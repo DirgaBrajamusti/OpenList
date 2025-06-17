@@ -32,8 +32,6 @@ func (d *Ddrv) GetAddition() driver.Additional {
 }
 
 func (d *Ddrv) Init(ctx context.Context) error {
-	// TODO login / refresh token
-	//op.MustSaveDriverStorage(d)
 	return nil
 }
 
@@ -387,9 +385,5 @@ func (d *Ddrv) Put(ctx context.Context, dstDir model.Obj, stream model.FileStrea
 	}
 	return nil
 }
-
-//func (d *Ddrv) Other(ctx context.Context, args model.OtherArgs) (interface{}, error) {
-//	return nil, errs.NotSupport
-//}
 
 var _ driver.Driver = (*Ddrv)(nil)
