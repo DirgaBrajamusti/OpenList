@@ -108,20 +108,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to DockerHub Container Registry
-        if: env.IMAGE_PUSH == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.ORG_NAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.ORG_NAME }}/${{ env.IMAGE_NAME }}
-            ${{ env.ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: ${{ env.IMAGE_TAGS_BETA }}
           flavor: |
             ${{ matrix.tag_favor }}
