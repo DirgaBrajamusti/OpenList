@@ -4,7 +4,9 @@ on:
   release:
     types: [ published ]
 
+permissions: write-all
 jobs:
+
   release_freebsd:
     strategy:
       matrix:
@@ -27,6 +29,8 @@ jobs:
       - name: Build
         run: |
           bash build.sh release freebsd
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload assets
         uses: softprops/action-gh-release@v2

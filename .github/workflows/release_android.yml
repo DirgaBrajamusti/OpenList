@@ -3,6 +3,8 @@ name: release_android
 on:
   release:
     types: [ published ]
+    
+permissions: write-all
 
 jobs:
   release_android:
@@ -27,6 +29,8 @@ jobs:
       - name: Build
         run: |
           bash build.sh release android
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload assets
         uses: softprops/action-gh-release@v2

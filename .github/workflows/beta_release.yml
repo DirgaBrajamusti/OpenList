@@ -3,6 +3,7 @@ name: beta release
 on:
   push:
     branches: [ 'main' ]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -45,7 +46,7 @@ jobs:
       - name: Upload assets to beta release
         uses: softprops/action-gh-release@v2
         with:
-          body: "See CHANGELOG.md"
+          body_path: CHANGELOG.md
           files: CHANGELOG.md
           prerelease: true
           tag_name: beta
@@ -92,9 +93,11 @@ jobs:
 
       - name: Setup web
         run: bash build.sh dev web
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
-        uses: OpenListTeam/cgo-actions@v1.1.1
+        uses: OpenListTeam/cgo-actions@v1.1.2
         with:
           targets: ${{ matrix.target }}
           musl-target-format: $os-$musl-$arch
@@ -111,6 +114,8 @@ jobs:
       - name: Compress
         run: |
           bash build.sh zip ${{ matrix.hash }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # See above           
       - name: Upload assets to beta release
@@ -149,7 +154,7 @@ jobs:
   #     - name: Checkout repo
   #       uses: actions/checkout@v4
   #       with:
-  #         repository: alist-org/desktop-release
+  #         repository: openlistteam/desktop-release
   #         ref: main
   #         persist-credentials: false
   #         fetch-depth: 0
@@ -165,4 +170,4 @@ jobs:
   #       with:
   #         github_token: ${{ secrets.MY_TOKEN }}
   #         branch: main
-  #         repository: alist-org/desktop-release
+  #         repository: openlistteam/desktop-release
