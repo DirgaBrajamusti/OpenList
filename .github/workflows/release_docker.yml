@@ -24,10 +24,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DOCKERHUB_ORG_NAME: dirgabrajamusti
   GHCR_ORG_NAME: dirgabrajamusti
   IMAGE_NAME: openlist-git
-  IMAGE_NAME_DOCKERHUB: openlist
   REGISTRY: ghcr.io
   ARTIFACT_NAME: 'binaries_docker_release'
   ARTIFACT_NAME_LITE: 'binaries_docker_release_lite'
@@ -176,21 +174,12 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # - name: Login to DockerHub Container Registry
-      #   if: env.IMAGE_PUSH == 'true'
-      #   uses: docker/login-action@v3
-      #   with:
-      #     username: ${{ env.DOCKERHUB_ORG_NAME }}
-      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
-            ${{ env.DOCKERHUB_ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: >
             ${{ env.IMAGE_IS_PROD == 'true' && (
               github.event_name == 'workflow_dispatch'
@@ -257,20 +246,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # - name: Login to DockerHub Container Registry
-      #   if: env.IMAGE_PUSH == 'true'
-      #   uses: docker/login-action@v3
-      #   with:
-      #     username: ${{ env.DOCKERHUB_ORG_NAME }}
-      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
-            ${{ env.DOCKERHUB_ORG_NAME }}/${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: >
             ${{ env.IMAGE_IS_PROD == 'true' && (
               github.event_name == 'workflow_dispatch'
