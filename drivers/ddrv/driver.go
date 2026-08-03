@@ -1,25 +1,38 @@
 package ddrv
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
+	"os"
+	stdpath "path"
 	"strconv"
 	"strings"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/sign"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/go-resty/resty/v2"
 )
 
 type Ddrv struct {
 	model.Storage
 	Addition
+
+	// Thumbnail settings
+	thumbConcurrency          int
+	thumbTokenBucket          TokenBucket
+	videoThumbPos             float64
+	videoThumbPosIsPercentage bool
 }
 
 func (d *Ddrv) Config() driver.Config {
@@ -33,6 +46,52 @@ func (d *Ddrv) GetAddition() driver.Additional {
 func (d *Ddrv) Init(ctx context.Context) error {
 	// TODO login / refresh token
 	//op.MustSaveDriverStorage(d)
+
+	// Thumbnail configuration
+	if d.ThumbCacheFolder != "" && !utils.Exists(d.ThumbCacheFolder) {
+		err := os.MkdirAll(d.ThumbCacheFolder, 0777)
+		if err != nil {
+			return err
+		}
+	}
+	if d.ThumbConcurrency != "" {
+		v, err := strconv.ParseUint(d.ThumbConcurrency, 10, 32)
+		if err != nil {
+			return err
+		}
+		d.thumbConcurrency = int(v)
+	}
+	if d.thumbConcurrency == 0 {
+		d.thumbTokenBucket = NewNopTokenBucket()
+	} else {
+		d.thumbTokenBucket = NewStaticTokenBucketWithMigration(d.thumbTokenBucket, d.thumbConcurrency)
+	}
+	// Check the VideoThumbPos value
+	if d.VideoThumbPos == "" {
+		d.VideoThumbPos = "20%"
+	}
+	if strings.HasSuffix(d.VideoThumbPos, "%") {
+		percentage := strings.TrimSuffix(d.VideoThumbPos, "%")
+		val, err := strconv.ParseFloat(percentage, 64)
+		if err != nil {
+			return fmt.Errorf("invalid video_thumb_pos value: %s, err: %s", d.VideoThumbPos, err)
+		}
+		if val < 0 || val > 100 {
+			return fmt.Errorf("invalid video_thumb_pos value: %s, the percentage must be a number between 0 and 100", d.VideoThumbPos)
+		}
+		d.videoThumbPosIsPercentage = true
+		d.videoThumbPos = val / 100
+	} else {
+		val, err := strconv.ParseFloat(d.VideoThumbPos, 64)
+		if err != nil {
+			return fmt.Errorf("invalid video_thumb_pos value: %s, err: %s", d.VideoThumbPos, err)
+		}
+		if val < 0 {
+			return fmt.Errorf("invalid video_thumb_pos value: %s, the time must be a positive number", d.VideoThumbPos)
+		}
+		d.videoThumbPosIsPercentage = false
+		d.videoThumbPos = val
+	}
 	return nil
 }
 
@@ -70,20 +129,38 @@ func (d *Ddrv) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]
 
 	var res []model.Obj
 	for _, item := range response.Data.Files {
+		// Construct the logical path for the item
+		itemPath := stdpath.Join(args.ReqPath, item.Name)
+
 		if !item.IsDir {
-			res = append(res, &model.Object{
+			obj := &model.Object{
 				ID:       item.ID,
 				Name:     item.Name,
-				Path:     item.Parent,
+				Path:     itemPath,
 				Size:     int64(item.Size),
 				IsFolder: false,
 				Modified: item.MTime,
-			})
+			}
+			// Wrap with thumbnail if enabled and file is image/video
+			if d.Thumbnail {
+				typeName := utils.GetFileType(item.Name)
+				if typeName == conf.IMAGE || typeName == conf.VIDEO {
+					thumbURL := common.GetApiUrl(ctx) + stdpath.Join("/d", itemPath)
+					thumbURL = utils.EncodePath(thumbURL, true)
+					thumbURL += "?type=thumb&sign=" + sign.Sign(itemPath)
+					res = append(res, &model.ObjThumb{
+						Object:    *obj,
+						Thumbnail: model.Thumbnail{Thumbnail: thumbURL},
+					})
+					continue
+				}
+			}
+			res = append(res, obj)
 		} else {
 			res = append(res, &model.Object{
 				ID:       item.ID,
 				Name:     item.Name,
-				Path:     item.Parent,
+				Path:     itemPath,
 				Size:     0,
 				IsFolder: true,
 				Modified: item.MTime,
@@ -94,6 +171,35 @@ func (d *Ddrv) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]
 }
 
 func (d *Ddrv) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
+	// Handle thumbnail requests
+	if args.Type == "thumb" && d.Thumbnail {
+		var buf *bytes.Buffer
+		var thumbPath *string
+		err := d.thumbTokenBucket.Do(ctx, func() error {
+			var err error
+			buf, thumbPath, err = d.getThumb(ctx, file)
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		link := &model.Link{
+			Header: http.Header{
+				"Content-Type": []string{"image/png"},
+			},
+		}
+		if thumbPath != nil {
+			open, err := os.Open(*thumbPath)
+			if err != nil {
+				return nil, err
+			}
+			link.MFile = open
+		} else {
+			link.MFile = model.NewNopMFile(bytes.NewReader(buf.Bytes()))
+		}
+		return link, nil
+	}
+
 	if d.Addition.CloudflareWorkers != "" {
 		url := d.Addition.CloudflareWorkers + "/" + file.GetID()
 
