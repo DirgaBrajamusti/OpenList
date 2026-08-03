@@ -19,6 +19,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/sign"
+	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/go-resty/resty/v2"
@@ -188,15 +189,27 @@ func (d *Ddrv) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*
 				"Content-Type": []string{"image/png"},
 			},
 		}
+		var mFile model.File
 		if thumbPath != nil {
 			open, err := os.Open(*thumbPath)
 			if err != nil {
 				return nil, err
 			}
-			link.MFile = open
+			// Get thumbnail file size for Content-Length
+			stat, err := open.Stat()
+			if err != nil {
+				open.Close()
+				return nil, err
+			}
+			link.ContentLength = int64(stat.Size())
+			mFile = open
 		} else {
-			link.MFile = model.NewNopMFile(bytes.NewReader(buf.Bytes()))
+			mFile = bytes.NewReader(buf.Bytes())
+			link.ContentLength = int64(buf.Len())
 		}
+		link.SyncClosers.AddIfCloser(mFile)
+		link.RangeReader = stream.GetRangeReaderFromMFile(link.ContentLength, mFile)
+		link.RequireReference = link.SyncClosers.Length() > 0
 		return link, nil
 	}
 

@@ -29,7 +29,7 @@ func Down(c *gin.Context) {
 		Proxy(c)
 		return
 	} else {
-		link, _, err := fs.Link(c.Request.Context(), rawPath, model.LinkArgs{
+		link, file, err := fs.Link(c.Request.Context(), rawPath, model.LinkArgs{
 			IP:       c.ClientIP(),
 			Header:   c.Request.Header,
 			Type:     c.Query("type"),
@@ -37,6 +37,12 @@ func Down(c *gin.Context) {
 		})
 		if err != nil {
 			common.ErrorPage(c, err, 500)
+			return
+		}
+		// If the link has no URL but has a RangeReader, proxy it instead of redirecting
+		// This handles cases like thumbnails that are generated locally
+		if link.URL == "" && link.RangeReader != nil {
+			proxy(c, link, file, storage.GetStorage().ProxyRange)
 			return
 		}
 		redirect(c, link)

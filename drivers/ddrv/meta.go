@@ -23,7 +23,6 @@ type Addition struct {
 var config = driver.Config{
 	Name:              "DDRV",
 	LocalSort:         false,
-	OnlyLocal:         false,
 	NoCache:           false,
 	NoUpload:          false,
 	NeedMs:            false,
