@@ -13,7 +13,7 @@ body:
     attributes:
       label: 请确认以下事项
       description: |
-        您必须勾选以下内容，否则您的问题可能会被直接关闭。
+        您必须阅读、检查、确认、同意以下内容，否则您的问题一定会被直接关闭。
         或者您可以去[讨论区](https://github.com/OpenListTeam/OpenList/discussions)。
       options:
         - label: |
@@ -25,16 +25,17 @@ body:
         - label: |
             我确认我的描述清晰，语法礼貌，能帮助开发者快速定位问题，并符合社区规则。
         - label: |
-            我已确认阅读了[OpenList文档](https://docs.oplist.org)。
+            我已确认阅读了[OpenList文档](https://doc.oplist.org)。
         - label: |
             我已确认没有重复的问题或讨论。
         - label: |
-            我已确认是`OpenList`的问题，而不是其他原因（例如 [网络](https://docs.oplist.org/zh/faq/howto.html#tls-handshake-timeout-read-connection-reset-by-peer-dns-lookup-failed-connect-connection-refused-client-timeout-exceeded-while-awaiting-headers-no-such-host) ，`依赖`或`操作`）。
+            我已确认是`OpenList`的问题，而不是其他原因（例如 [网络](https://doc.oplist.org/faq/howto#tls-handshake-timeout-read-connection-reset-by-peer-dns-lookup-failed-connect-connection-refused-client-timeout-exceeded-while-awaiting-headers-no-such-host-1) ，`依赖`或`操作`）。
         - label: |
             我认为此问题必须由`OpenList`处理，而非第三方。
         - label: |
             我已确认这个问题在最新版本中没有被修复。
-
+        - label: |
+            我没有阅读这个清单，只是闭眼选中了所有的复选框，请关闭这个 Issue 。
   - type: input
     id: version
     attributes:
@@ -60,6 +61,14 @@ body:
     validations:
       required: true
   - type: textarea
+    id: logs
+    attributes:
+      label: 日志（必填）
+      description: |
+        请复制粘贴错误日志，或者截图。(可隐藏隐私字段) [查看方法](https://doc.oplist.org/faq/howto#%E5%A6%82%E4%BD%95%E5%BF%AB%E9%80%9F%E5%AE%9A%E4%BD%8Dbug)
+    validations:
+      required: true
+  - type: textarea
     id: config
     attributes:
       label: 配置文件内容（必填）
@@ -68,14 +77,14 @@ body:
     validations:
       required: true
   - type: textarea
-    id: logs
-    attributes:
-      label: 日志（可选）
-      description: |
-        请复制粘贴错误日志，或者截图。(可隐藏隐私字段)
-  - type: textarea
     id: reproduction
     attributes:
       label: 复现链接（可选）
       description: |
         请提供能复现此问题的链接。
+  - type: textarea
+    id: aigenerated
+    attributes:
+      label: AI生成内容（可选）
+      description: |
+        如果此问题是由AI辅助您发现的，请提供全部聊天记录，包括使用的模型信息。

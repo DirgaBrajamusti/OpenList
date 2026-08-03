@@ -3,12 +3,12 @@ package strm
 import (
 	"context"
 	"fmt"
-
 	stdpath "path"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/sign"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
@@ -18,6 +18,7 @@ func (d *Strm) listRoot() []model.Obj {
 	var objs []model.Obj
 	for k := range d.pathMap {
 		obj := model.Object{
+			Path:     "/" + k,
 			Name:     k,
 			IsFolder: true,
 			Modified: d.Modified,
@@ -51,101 +52,101 @@ func (d *Strm) getRootAndPath(path string) (string, string) {
 	return parts[0], parts[1]
 }
 
-func (d *Strm) get(ctx context.Context, path string, dst, sub string) (model.Obj, error) {
-	reqPath := stdpath.Join(dst, sub)
-	obj, err := fs.Get(ctx, reqPath, &fs.GetArgs{NoLog: true})
-	if err != nil {
-		return nil, err
-	}
-	size := int64(0)
-	if !obj.IsDir() {
-		if utils.Ext(obj.GetName()) == "strm" {
-			size = obj.GetSize()
-		} else {
-			file := stdpath.Join(reqPath, obj.GetName())
-			size = int64(len(d.getLink(ctx, file)))
-		}
-	}
-	return &model.Object{
-		Path:     path,
-		Name:     obj.GetName(),
-		Size:     size,
-		Modified: obj.ModTime(),
-		IsFolder: obj.IsDir(),
-		HashInfo: obj.GetHash(),
-	}, nil
-}
-
 func (d *Strm) list(ctx context.Context, dst, sub string, args *fs.ListArgs) ([]model.Obj, error) {
 	reqPath := stdpath.Join(dst, sub)
 	objs, err := fs.List(ctx, reqPath, args)
 	if err != nil {
 		return nil, err
 	}
+	return d.convert2strmObjs(ctx, reqPath, objs), nil
+}
 
+func (d *Strm) convert2strmObjs(ctx context.Context, reqPath string, objs []model.Obj) []model.Obj {
 	var validObjs []model.Obj
 	for _, obj := range objs {
+		id, name, path := "", obj.GetName(), ""
+		size := int64(0)
 		if !obj.IsDir() {
-			ext := strings.ToLower(utils.Ext(obj.GetName()))
-			if _, ok := supportSuffix[ext]; !ok {
+			path = stdpath.Join(reqPath, obj.GetName())
+			sourceExt := utils.SourceExt(name)
+			ext := strings.ToLower(sourceExt)
+			if _, ok := d.downloadSuffix[ext]; ok {
+				size = obj.GetSize()
+			} else if _, ok := d.supportSuffix[ext]; ok {
+				id = "strm"
+				name = strings.TrimSuffix(name, sourceExt) + "strm"
+				size = int64(len(d.getLink(ctx, path)))
+			} else {
 				continue
 			}
 		}
-		validObjs = append(validObjs, obj)
-	}
-	return utils.SliceConvert(validObjs, func(obj model.Obj) (model.Obj, error) {
-		name := obj.GetName()
-		size := int64(0)
-		if !obj.IsDir() {
-			ext := utils.Ext(name)
-			name = strings.TrimSuffix(name, ext) + "strm"
-			if ext == "strm" {
-				size = obj.GetSize()
-			} else {
-				file := stdpath.Join(reqPath, obj.GetName())
-				size = int64(len(d.getLink(ctx, file)))
-			}
-		}
 		objRes := model.Object{
+			ID:       id,
+			Path:     path,
 			Name:     name,
 			Size:     size,
 			Modified: obj.ModTime(),
 			IsFolder: obj.IsDir(),
-			Path:     stdpath.Join(sub, obj.GetName()),
 		}
 		thumb, ok := model.GetThumb(obj)
 		if !ok {
-			return &objRes, nil
+			validObjs = append(validObjs, &objRes)
+			continue
 		}
-		return &model.ObjThumb{
+		validObjs = append(validObjs, &model.ObjThumb{
 			Object: objRes,
 			Thumbnail: model.Thumbnail{
 				Thumbnail: thumb,
 			},
-		}, nil
-	})
-}
-
-func (d *Strm) link(ctx context.Context, dst, sub string) (*model.Link, error) {
-	reqPath := stdpath.Join(dst, sub)
-	_, err := fs.Get(ctx, reqPath, &fs.GetArgs{NoLog: true})
-	if err != nil {
-		return nil, err
+		})
 	}
-	return &model.Link{
-		MFile: model.NewNopMFile(strings.NewReader(d.getLink(ctx, reqPath))),
-	}, nil
+	return validObjs
 }
 
 func (d *Strm) getLink(ctx context.Context, path string) string {
+	finalPath := path
+	if d.EncodePath {
+		finalPath = utils.EncodePath(path, true)
+	}
+	if d.WithSign {
+		signPath := sign.Sign(path)
+		finalPath = fmt.Sprintf("%s?sign=%s", finalPath, signPath)
+	}
+	pathPrefix := d.PathPrefix
+	if len(pathPrefix) > 0 {
+		finalPath = stdpath.Join(pathPrefix, finalPath)
+	}
+	if !strings.HasPrefix(finalPath, "/") {
+		finalPath = "/" + finalPath
+	}
+	if d.WithoutUrl {
+		return finalPath
+	}
 	apiUrl := d.SiteUrl
 	if len(apiUrl) > 0 {
 		apiUrl = strings.TrimSuffix(apiUrl, "/")
 	} else {
 		apiUrl = common.GetApiUrl(ctx)
 	}
-	return fmt.Sprintf("%s/d%s?sign=%s",
+	return fmt.Sprintf("%s%s",
 		apiUrl,
-		utils.EncodePath(path, true),
-		sign.Sign(path))
+		finalPath)
+}
+
+func (d *Strm) link(ctx context.Context, reqPath string, args model.LinkArgs) (*model.Link, model.Obj, error) {
+	storage, reqActualPath, err := op.GetStorageAndActualPath(reqPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !args.Redirect {
+		return op.Link(ctx, storage, reqActualPath, args)
+	}
+	obj, err := fs.Get(ctx, reqPath, &fs.GetArgs{NoLog: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	if common.ShouldProxy(storage, stdpath.Base(reqPath)) {
+		return nil, obj, nil
+	}
+	return op.Link(ctx, storage, reqActualPath, args)
 }

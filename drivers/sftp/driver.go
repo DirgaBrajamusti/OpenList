@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path"
+	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/pkg/sftp"
 	log "github.com/sirupsen/logrus"
@@ -29,7 +31,7 @@ func (d *SFTP) GetAddition() driver.Additional {
 }
 
 func (d *SFTP) Init(ctx context.Context) error {
-	return d.initClient()
+	return d._initClient()
 }
 
 func (d *SFTP) Drop(ctx context.Context) error {
@@ -62,10 +64,16 @@ func (d *SFTP) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*
 	if err != nil {
 		return nil, err
 	}
-	link := &model.Link{
-		MFile: remoteFile,
+	mFile := &stream.RateLimitFile{
+		File:    remoteFile,
+		Limiter: stream.ServerDownloadLimit,
+		Ctx:     ctx,
 	}
-	return link, nil
+	return &model.Link{
+		RangeReader:      stream.GetRangeReaderFromMFile(file.GetSize(), mFile),
+		SyncClosers:      utils.NewSyncClosers(remoteFile),
+		RequireReference: true,
+	}, nil
 }
 
 func (d *SFTP) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
@@ -113,6 +121,24 @@ func (d *SFTP) Put(ctx context.Context, dstDir model.Obj, stream model.FileStrea
 	}()
 	err = utils.CopyWithCtx(ctx, dstFile, driver.NewLimitedUploadStream(ctx, stream), stream.GetSize(), up)
 	return err
+}
+
+func (d *SFTP) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	stat, err := d.client.StatVFS(d.RootFolderPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "unimplemented") {
+			return nil, errs.NotImplement
+		}
+		return nil, err
+	}
+	total := int64(stat.Blocks * stat.Bsize)
+	free := int64(stat.Bfree * stat.Bsize)
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: total,
+			UsedSpace:  total - free,
+		},
+	}, nil
 }
 
 var _ driver.Driver = (*SFTP)(nil)

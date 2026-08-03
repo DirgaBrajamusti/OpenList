@@ -4,6 +4,8 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap/patch/v3_24_0"
 	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap/patch/v3_32_0"
 	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap/patch/v3_41_0"
+	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap/patch/v4_1_8"
+	"github.com/OpenListTeam/OpenList/v4/internal/bootstrap/patch/v4_1_9"
 )
 
 type VersionPatches struct {
@@ -30,6 +32,19 @@ var UpgradePatches = []VersionPatches{
 		Version: "v3.41.0",
 		Patches: []func(){
 			v3_41_0.GrantAdminPermissions,
+		},
+	},
+	{
+		Version: "v4.1.8",
+		Patches: []func(){
+			v4_1_8.FixAliasConfig,
+		},
+	},
+	{
+		Version: "v4.1.9",
+		Patches: []func(){
+			v4_1_9.EnableWebDavProxy,
+			v4_1_9.ResetSkipTlsVerify,
 		},
 	},
 }

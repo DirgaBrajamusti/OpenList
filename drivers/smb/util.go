@@ -1,42 +1,45 @@
 package smb
 
 import (
+	"context"
+	"fmt"
 	"io/fs"
-	"net"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/pkg/singleflight"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/cloudsoda/go-smb2"
 )
 
 func (d *SMB) updateLastConnTime() {
-	atomic.StoreInt64(&d.lastConnTime, time.Now().Unix())
+	d.lastConnTime.Store(time.Now().Unix())
 }
 
 func (d *SMB) cleanLastConnTime() {
-	atomic.StoreInt64(&d.lastConnTime, 0)
+	d.lastConnTime.Store(0)
 }
 
 func (d *SMB) getLastConnTime() time.Time {
-	return time.Unix(atomic.LoadInt64(&d.lastConnTime), 0)
+	return time.Unix(d.lastConnTime.Load(), 0)
 }
 
-func (d *SMB) initFS() error {
-	conn, err := net.Dial("tcp", d.Address)
-	if err != nil {
-		return err
-	}
+func (d *SMB) initFS(ctx context.Context) error {
+	_, err, _ := singleflight.AnyGroup.Do(fmt.Sprintf("SMB.initFS:%p", d), func() (any, error) {
+		return nil, d._initFS(ctx)
+	})
+	return err
+}
+func (d *SMB) _initFS(ctx context.Context) error {
 	dialer := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{
 			User:     d.Username,
 			Password: d.Password,
 		},
 	}
-	s, err := dialer.Dial(conn)
+	s, err := dialer.Dial(ctx, d.Address)
 	if err != nil {
 		return err
 	}
@@ -48,14 +51,14 @@ func (d *SMB) initFS() error {
 	return err
 }
 
-func (d *SMB) checkConn() error {
+func (d *SMB) checkConn(ctx context.Context) error {
 	if time.Since(d.getLastConnTime()) < 5*time.Minute {
 		return nil
 	}
 	if d.fs != nil {
 		_ = d.fs.Umount()
 	}
-	return d.initFS()
+	return d.initFS(ctx)
 }
 
 // CopyFile File copies a single file from src to dst

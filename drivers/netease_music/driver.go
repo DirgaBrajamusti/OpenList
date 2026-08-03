@@ -42,14 +42,11 @@ func (d *NeteaseMusic) Drop(ctx context.Context) error {
 	return nil
 }
 
-func (d *NeteaseMusic) Get(ctx context.Context, path string) (model.Obj, error) {
-	if path == "/" {
-		return &model.Object{
-			IsFolder: true,
-			Path:     path,
-		}, nil
-	}
+func (Addition) GetRootPath() string {
+	return "/"
+}
 
+func (d *NeteaseMusic) Get(ctx context.Context, path string) (model.Obj, error) {
 	fragments := strings.Split(path, "/")
 	if len(fragments) > 1 {
 		fileName := fragments[1]
@@ -73,7 +70,7 @@ func (d *NeteaseMusic) List(ctx context.Context, dir model.Obj, args model.ListA
 
 func (d *NeteaseMusic) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
 	if lrc, ok := file.(*LyricObj); ok {
-		if args.Type == "parsed" {
+		if args.Type == "parsed" && !args.Redirect {
 			return lrc.getLyricLink(), nil
 		} else {
 			return lrc.getProxyLink(ctx), nil

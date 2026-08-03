@@ -2,7 +2,9 @@ package _115_share
 
 import (
 	"context"
+	"net/http"
 
+	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -49,9 +51,16 @@ func (d *Pan115Share) List(ctx context.Context, dir model.Obj, args model.ListAr
 	if err := d.WaitLimit(ctx); err != nil {
 		return nil, err
 	}
-
+	var ua string
+	// TODO: will use user agent from header
+	// if args.Header != nil {
+	// 	ua = args.Header.Get("User-Agent")
+	// }
+	if ua == "" {
+		ua = base.UserAgentNT
+	}
 	files := make([]driver115.ShareFile, 0)
-	fileResp, err := d.client.GetShareSnap(d.ShareCode, d.ReceiveCode, dir.GetID(), driver115.QueryLimit(int(d.PageSize)))
+	fileResp, err := d.client.GetShareSnapWithUA(ua, d.ShareCode, d.ReceiveCode, dir.GetID(), driver115.QueryLimit(int(d.PageSize)))
 	if err != nil {
 		return nil, err
 	}
@@ -77,12 +86,20 @@ func (d *Pan115Share) Link(ctx context.Context, file model.Obj, args model.LinkA
 	if err := d.WaitLimit(ctx); err != nil {
 		return nil, err
 	}
-	downloadInfo, err := d.client.DownloadByShareCode(d.ShareCode, d.ReceiveCode, file.GetID())
+	var ua string
+	if args.Header != nil {
+		ua = args.Header.Get("User-Agent")
+	}
+	downloadInfo, err := d.client.DownloadByShareCodeWithUA(ua, d.ShareCode, d.ReceiveCode, file.GetID())
 	if err != nil {
 		return nil, err
 	}
-
-	return &model.Link{URL: downloadInfo.URL.URL}, nil
+	header := http.Header{}
+	header.Set("User-Agent", ua)
+	return &model.Link{
+		URL:    downloadInfo.URL.URL,
+		Header: header,
+	}, nil
 }
 
 func (d *Pan115Share) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {

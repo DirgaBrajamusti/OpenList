@@ -3,41 +3,32 @@ package fs
 import (
 	"context"
 
-	"github.com/OpenListTeam/OpenList/v4/internal/errs"
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/internal/task"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/pkg/errors"
 )
 
-func makeDir(ctx context.Context, path string, lazyCache ...bool) error {
+func makeDir(ctx context.Context, path string) error {
 	storage, actualPath, err := op.GetStorageAndActualPath(path)
 	if err != nil {
 		return errors.WithMessage(err, "failed get storage")
 	}
-	return op.MakeDir(ctx, storage, actualPath, lazyCache...)
+	return op.MakeDir(ctx, storage, actualPath)
 }
 
-func move(ctx context.Context, srcPath, dstDirPath string, lazyCache ...bool) error {
-	srcStorage, srcActualPath, err := op.GetStorageAndActualPath(srcPath)
-	if err != nil {
-		return errors.WithMessage(err, "failed get src storage")
-	}
-	dstStorage, dstDirActualPath, err := op.GetStorageAndActualPath(dstDirPath)
-	if err != nil {
-		return errors.WithMessage(err, "failed get dst storage")
-	}
-	if srcStorage.GetStorage() != dstStorage.GetStorage() {
-		return errors.WithStack(errs.MoveBetweenTwoStorages)
-	}
-	return op.Move(ctx, srcStorage, srcActualPath, dstDirActualPath, lazyCache...)
-}
-
-func rename(ctx context.Context, srcPath, dstName string, lazyCache ...bool) error {
+func rename(ctx context.Context, srcPath, dstName string, skipHook ...bool) error {
 	storage, srcActualPath, err := op.GetStorageAndActualPath(srcPath)
 	if err != nil {
 		return errors.WithMessage(err, "failed get storage")
 	}
-	return op.Rename(ctx, storage, srcActualPath, dstName, lazyCache...)
+	if utils.IsBool(skipHook...) {
+		ctx = context.WithValue(ctx, conf.SkipHookKey, struct{}{})
+	}
+	return op.Rename(ctx, storage, srcActualPath, dstName)
 }
 
 func remove(ctx context.Context, path string) error {
@@ -55,4 +46,19 @@ func other(ctx context.Context, args model.FsOtherArgs) (interface{}, error) {
 	}
 	args.Path = actualPath
 	return op.Other(ctx, storage, args)
+}
+
+type TaskData struct {
+	task.TaskExtension
+	Status        string        `json:"-"` //don't save status to save space
+	SrcActualPath string        `json:"src_path"`
+	DstActualPath string        `json:"dst_path"`
+	SrcStorage    driver.Driver `json:"-"`
+	DstStorage    driver.Driver `json:"-"`
+	SrcStorageMp  string        `json:"src_storage_mp"`
+	DstStorageMp  string        `json:"dst_storage_mp"`
+}
+
+func (t *TaskData) GetStatus() string {
+	return t.Status
 }

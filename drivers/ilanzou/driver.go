@@ -97,13 +97,13 @@ func (d *ILanZou) List(ctx context.Context, dir model.Obj, args model.ListArgs) 
 		}
 		obj := model.Object{
 			ID: strconv.FormatInt(f.FileId, 10),
-			//Path:     "",
+			// Path:     "",
 			Name:     f.FileName,
 			Size:     f.FileSize * 1024,
 			Modified: updTime,
 			Ctime:    updTime,
 			IsFolder: false,
-			//HashInfo: utils.HashInfo{},
+			// HashInfo: utils.HashInfo{},
 		}
 		if f.FileType == 2 {
 			obj.IsFolder = true
@@ -120,7 +120,10 @@ func (d *ILanZou) Link(ctx context.Context, file model.Obj, args model.LinkArgs)
 	if err != nil {
 		return nil, err
 	}
-	ts, ts_str, _ := getTimestamp(d.conf.secret)
+	ts, tsStr, err := getTimestamp(d.conf.secret)
+	if err != nil {
+		return nil, err
+	}
 
 	params := []string{
 		"uuid=" + url.QueryEscape(d.UUID),
@@ -129,9 +132,9 @@ func (d *ILanZou) Link(ctx context.Context, file model.Obj, args model.LinkArgs)
 		"devModel=chrome",
 		"devVersion=" + url.QueryEscape(d.conf.devVersion),
 		"appVersion=",
-		"timestamp=" + ts_str,
+		"timestamp=" + tsStr,
 		"appToken=" + url.QueryEscape(d.Token),
-		"enable=0",
+		"enable=1",
 	}
 
 	downloadId, err := mopan.AesEncrypt([]byte(fmt.Sprintf("%s|%s", file.GetID(), d.userID)), d.conf.secret)
@@ -149,11 +152,12 @@ func (d *ILanZou) Link(ctx context.Context, file model.Obj, args model.LinkArgs)
 	u.RawQuery = strings.Join(params, "&")
 	realURL := u.String()
 	// get the url after redirect
-	req := base.NoRedirectClient.R()
-
+	req := base.NoRedirectClient.R().SetContext(ctx)
 	req.SetHeaders(map[string]string{
-		"Referer":    d.conf.site + "/",
-		"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
+		"Origin":          d.conf.site,
+		"Referer":         d.conf.site + "/",
+		"Accept-Encoding": "gzip",
+		"Accept-Language": "zh-CN,zh;q=0.9,en-US,en;q=0.8",
 	})
 	if d.Addition.Ip != "" {
 		req.SetHeader("X-Forwarded-For", d.Addition.Ip)
@@ -163,10 +167,13 @@ func (d *ILanZou) Link(ctx context.Context, file model.Obj, args model.LinkArgs)
 	if err != nil {
 		return nil, err
 	}
-	if res.StatusCode() == 302 {
-		realURL = res.Header().Get("location")
+	location := res.Header().Get("location")
+	if location != "" && utils.SliceContains([]int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect}, res.StatusCode()) {
+		realURL = location
+	} else if res.StatusCode() == http.StatusOK && location != "" {
+		realURL = location
 	} else {
-		return nil, fmt.Errorf("redirect failed, status: %d, msg: %s", res.StatusCode(), utils.Json.Get(res.Body(), "msg").ToString())
+		return nil, fmt.Errorf("redirect failed, status: %d, location: %s, msg: %s", res.StatusCode(), location, utils.Json.Get(res.Body(), "msg").ToString())
 	}
 	link := model.Link{URL: realURL}
 	return &link, nil
@@ -185,13 +192,13 @@ func (d *ILanZou) MakeDir(ctx context.Context, parentDir model.Obj, dirName stri
 	}
 	return &model.Object{
 		ID: utils.Json.Get(res, "list", 0, "id").ToString(),
-		//Path:     "",
+		// Path:     "",
 		Name:     dirName,
 		Size:     0,
 		Modified: time.Now(),
 		Ctime:    time.Now(),
 		IsFolder: true,
-		//HashInfo: utils.HashInfo{},
+		// HashInfo: utils.HashInfo{},
 	}, nil
 }
 
@@ -239,7 +246,7 @@ func (d *ILanZou) Rename(ctx context.Context, srcObj model.Obj, newName string) 
 	}
 	return &model.Object{
 		ID: srcObj.GetID(),
-		//Path:     "",
+		// Path:     "",
 		Name:     newName,
 		Size:     srcObj.GetSize(),
 		Modified: time.Now(),
@@ -276,7 +283,7 @@ func (d *ILanZou) Put(ctx context.Context, dstDir model.Obj, s model.FileStreame
 	etag := s.GetHash().GetHash(utils.MD5)
 	var err error
 	if len(etag) != utils.MD5.Width {
-		_, etag, err = stream.CacheFullInTempFileAndHash(s, utils.MD5)
+		_, etag, err = stream.CacheFullAndHash(s, &up, utils.MD5)
 		if err != nil {
 			return nil, err
 		}
@@ -296,6 +303,23 @@ func (d *ILanZou) Put(ctx context.Context, dstDir model.Obj, s model.FileStreame
 		return nil, err
 	}
 	upToken := utils.Json.Get(res, "upToken").ToString()
+	if upToken == "-1" {
+		// 支持秒传
+		var resp UploadTokenRapidResp
+		err := utils.Json.Unmarshal(res, &resp)
+		if err != nil {
+			return nil, err
+		}
+		return &model.Object{
+			ID:       strconv.FormatInt(resp.Map.FileID, 10),
+			Name:     resp.Map.FileName,
+			Size:     s.GetSize(),
+			Modified: s.ModTime(),
+			Ctime:    s.CreateTime(),
+			IsFolder: false,
+			HashInfo: utils.NewHashInfo(utils.MD5, etag),
+		}, nil
+	}
 	now := time.Now()
 	key := fmt.Sprintf("disk/%d/%d/%d/%s/%016d", now.Year(), now.Month(), now.Day(), d.account, now.UnixMilli())
 	reader := driver.NewLimitedUploadStream(ctx, &driver.ReaderUpdatingProgress{
@@ -375,13 +399,33 @@ func (d *ILanZou) Put(ctx context.Context, dstDir model.Obj, s model.FileStreame
 	}
 	return &model.Object{
 		ID: strconv.FormatInt(file.FileId, 10),
-		//Path:     ,
+		// Path:     ,
 		Name:     file.FileName,
 		Size:     s.GetSize(),
 		Modified: s.ModTime(),
 		Ctime:    s.CreateTime(),
 		IsFolder: false,
 		HashInfo: utils.NewHashInfo(utils.MD5, etag),
+	}, nil
+}
+
+func (d *ILanZou) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	res, err := d.proved("/user/account/map", http.MethodGet, func(req *resty.Request) {
+		req.SetContext(ctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	vipSize := utils.Json.Get(res, "map", "vipSize").ToInt64() * 1024
+	totalSize := utils.Json.Get(res, "map", "totalSize").ToInt64() * 1024
+	rewardSize := utils.Json.Get(res, "map", "rewardSize").ToInt64() * 1024
+	total := totalSize + rewardSize + vipSize
+	used := utils.Json.Get(res, "map", "usedSize").ToInt64() * 1024
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: total,
+			UsedSpace:  used,
+		},
 	}, nil
 }
 

@@ -7,7 +7,6 @@ import (
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
-	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"golang.org/x/time/rate"
 )
 
@@ -42,17 +41,14 @@ type RateLimitReader struct {
 }
 
 func (r *RateLimitReader) Read(p []byte) (n int, err error) {
-	if r.Ctx != nil && utils.IsCanceled(r.Ctx) {
-		return 0, r.Ctx.Err()
+	if err = r.Ctx.Err(); err != nil {
+		return 0, err
 	}
 	n, err = r.Reader.Read(p)
 	if err != nil {
 		return
 	}
 	if r.Limiter != nil {
-		if r.Ctx == nil {
-			r.Ctx = context.Background()
-		}
 		err = r.Limiter.WaitN(r.Ctx, n)
 	}
 	return
@@ -72,17 +68,14 @@ type RateLimitWriter struct {
 }
 
 func (w *RateLimitWriter) Write(p []byte) (n int, err error) {
-	if w.Ctx != nil && utils.IsCanceled(w.Ctx) {
-		return 0, w.Ctx.Err()
+	if err = w.Ctx.Err(); err != nil {
+		return 0, err
 	}
 	n, err = w.Writer.Write(p)
 	if err != nil {
 		return
 	}
 	if w.Limiter != nil {
-		if w.Ctx == nil {
-			w.Ctx = context.Background()
-		}
 		err = w.Limiter.WaitN(w.Ctx, n)
 	}
 	return
@@ -102,52 +95,53 @@ type RateLimitFile struct {
 }
 
 func (r *RateLimitFile) Read(p []byte) (n int, err error) {
-	if r.Ctx != nil && utils.IsCanceled(r.Ctx) {
-		return 0, r.Ctx.Err()
+	if err = r.Ctx.Err(); err != nil {
+		return 0, err
 	}
 	n, err = r.File.Read(p)
 	if err != nil {
 		return
 	}
 	if r.Limiter != nil {
-		if r.Ctx == nil {
-			r.Ctx = context.Background()
-		}
 		err = r.Limiter.WaitN(r.Ctx, n)
 	}
 	return
 }
 
 func (r *RateLimitFile) ReadAt(p []byte, off int64) (n int, err error) {
-	if r.Ctx != nil && utils.IsCanceled(r.Ctx) {
-		return 0, r.Ctx.Err()
+	if err = r.Ctx.Err(); err != nil {
+		return 0, err
 	}
 	n, err = r.File.ReadAt(p, off)
 	if err != nil {
 		return
 	}
 	if r.Limiter != nil {
-		if r.Ctx == nil {
-			r.Ctx = context.Background()
-		}
 		err = r.Limiter.WaitN(r.Ctx, n)
 	}
 	return
 }
 
-type RateLimitRangeReadCloser struct {
-	model.RangeReadCloserIF
-	Limiter Limiter
+func (r *RateLimitFile) Close() error {
+	if c, ok := r.File.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
 }
 
-func (rrc *RateLimitRangeReadCloser) RangeRead(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
-	rc, err := rrc.RangeReadCloserIF.RangeRead(ctx, httpRange)
+type RateLimitRangeReaderFunc RangeReaderFunc
+
+func (f RateLimitRangeReaderFunc) RangeRead(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
+	if ServerDownloadLimit == nil {
+		return f(ctx, httpRange)
+	}
+	rc, err := f(ctx, httpRange)
 	if err != nil {
 		return nil, err
 	}
 	return &RateLimitReader{
-		Reader:  rc,
-		Limiter: rrc.Limiter,
 		Ctx:     ctx,
+		Reader:  rc,
+		Limiter: ServerDownloadLimit,
 	}, nil
 }

@@ -20,7 +20,9 @@ import (
 type CloudreveV4 struct {
 	model.Storage
 	Addition
-	ref *CloudreveV4
+	ref            *CloudreveV4
+	AccessExpires  string
+	RefreshExpires string
 }
 
 func (d *CloudreveV4) Config() driver.Config {
@@ -44,13 +46,20 @@ func (d *CloudreveV4) Init(ctx context.Context) error {
 	if d.ref != nil {
 		return nil
 	}
-	if d.AccessToken == "" && d.RefreshToken != "" {
-		return d.refreshToken()
+	if d.isShare() {
+		return nil
 	}
-	if d.Username != "" {
+	if d.canLogin() {
 		return d.login()
 	}
-	return nil
+	if d.RefreshToken != "" {
+		return d.refreshToken()
+	}
+	if d.AccessToken == "" {
+		return errors.New("no way to authenticate. At least AccessToken is required")
+	}
+	// ensure AccessToken is valid
+	return d.parseJWT(d.AccessToken, &AccessJWT{})
 }
 
 func (d *CloudreveV4) InitReference(storage driver.Driver) error {
@@ -123,18 +132,21 @@ func (d *CloudreveV4) List(ctx context.Context, dir model.Obj, args model.ListAr
 			}
 		}
 		return &model.ObjThumb{
-			Object: model.Object{
-				ID:       src.ID,
-				Path:     src.Path,
-				Name:     src.Name,
-				Size:     src.Size,
-				Modified: src.UpdatedAt,
-				Ctime:    src.CreatedAt,
-				IsFolder: src.Type == 1,
-			},
+			Object:    *fileToObject(&src),
 			Thumbnail: thumb,
 		}, nil
 	})
+}
+
+func (d *CloudreveV4) Get(ctx context.Context, path string) (model.Obj, error) {
+	var info File
+	err := d.request(http.MethodGet, "/file/info", func(req *resty.Request) {
+		req.SetQueryParam("uri", d.RootFolderPath+path)
+	}, &info)
+	if err != nil {
+		return nil, err
+	}
+	return fileToObject(&info), nil
 }
 
 func (d *CloudreveV4) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
@@ -155,6 +167,10 @@ func (d *CloudreveV4) Link(ctx context.Context, file model.Obj, args model.LinkA
 	return &model.Link{
 		URL:        url.Urls[0].URL,
 		Expiration: &exp,
+		Header: http.Header{
+			"Referer":    {d.Address},
+			"User-Agent": {d.getUA()},
+		},
 	}, nil
 }
 
@@ -293,7 +309,9 @@ func (d *CloudreveV4) Put(ctx context.Context, dstDir model.Obj, file model.File
 		case "onedrive":
 			err = d.upOneDrive(ctx, file, u, up)
 		case "s3":
-			err = d.upS3(ctx, file, u, up)
+			err = d.upS3(ctx, file, u, up, "s3")
+		case "ks3":
+			err = d.upS3(ctx, file, u, up, "ks3")
 		default:
 			return errs.NotImplement
 		}
@@ -331,6 +349,23 @@ func (d *CloudreveV4) ArchiveDecompress(ctx context.Context, srcObj, dstDir mode
 	// a folder with the same name as the archive file needs to be created to store the extracted results if args.PutIntoNewDir
 	// return errs.NotImplement to use an internal archive tool
 	return nil, errs.NotImplement
+}
+
+func (d *CloudreveV4) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	// TODO return storage details (total space, free space, etc.)
+	var r CapacityResp
+	err := d.request(http.MethodGet, "/user/capacity", func(req *resty.Request) {
+		req.SetContext(ctx)
+	}, &r)
+	if err != nil {
+		return nil, err
+	}
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: r.Total,
+			UsedSpace:  r.Used,
+		},
+	}, nil
 }
 
 //func (d *CloudreveV4) Other(ctx context.Context, args model.OtherArgs) (interface{}, error) {

@@ -9,6 +9,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils/random"
+	"github.com/OpenListTeam/go-cache"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/pkg/errors"
 )
@@ -19,7 +20,22 @@ const (
 	ADMIN
 )
 
-const StaticHashSalt = "https://github.com/alist-org/alist"
+const (
+	StaticHashSalt = "https://github.com/alist-org/alist"
+
+	InvalidUsernameOrPassword = "Invalid username or password"
+	Invalid2FACode            = "Invalid 2FA code"
+	TooManyAttempts           = "Too many unsuccessful sign-in attempts have been made using an incorrect username or password, Try again later."
+	GuestCannotUpdateProfile  = "Guest user can not update profile"
+	GuestCannotGenerate2FA    = "Guest user can not generate 2FA code"
+)
+
+var LoginCache = cache.NewMemCache[int]()
+
+var (
+	DefaultLockDuration   = time.Minute * 5
+	DefaultMaxAuthRetries = 5
+)
 
 type User struct {
 	ID       uint   `json:"id" gorm:"primaryKey"`                      // unique key
@@ -46,10 +62,13 @@ type User struct {
 	//   11: ftp/sftp write
 	//   12: can read archives
 	//   13: can decompress archives
+	//   14: can share
+	//   15: can customize share id
 	Permission int32  `json:"permission"`
 	OtpSecret  string `json:"-"`
 	SsoID      string `json:"sso_id"` // unique by sso platform
 	Authn      string `gorm:"type:text" json:"-"`
+	AllowLdap  bool   `json:"allow_ldap" gorm:"default:true"`
 }
 
 func (u *User) IsGuest() bool {
@@ -81,60 +100,132 @@ func (u *User) SetPassword(pwd string) *User {
 	return u
 }
 
+func CanSeeHides(permission int32) bool {
+	return permission&1 == 1
+}
+
 func (u *User) CanSeeHides() bool {
-	return u.Permission&1 == 1
+	return CanSeeHides(u.Permission)
+}
+
+func CanAccessWithoutPassword(permission int32) bool {
+	return (permission>>1)&1 == 1
 }
 
 func (u *User) CanAccessWithoutPassword() bool {
-	return (u.Permission>>1)&1 == 1
+	return CanAccessWithoutPassword(u.Permission)
+}
+
+func CanAddOfflineDownloadTasks(permission int32) bool {
+	return (permission>>2)&1 == 1
 }
 
 func (u *User) CanAddOfflineDownloadTasks() bool {
-	return (u.Permission>>2)&1 == 1
+	return CanAddOfflineDownloadTasks(u.Permission)
 }
 
-func (u *User) CanWrite() bool {
-	return (u.Permission>>3)&1 == 1
+func CanWriteContent(permission int32) bool {
+	return (permission>>3)&1 == 1
+}
+
+func (u *User) CanWriteContent() bool {
+	return CanWriteContent(u.Permission)
+}
+
+func CanRename(permission int32) bool {
+	return (permission>>4)&1 == 1
 }
 
 func (u *User) CanRename() bool {
-	return (u.Permission>>4)&1 == 1
+	return CanRename(u.Permission)
+}
+
+func CanMove(permission int32) bool {
+	return (permission>>5)&1 == 1
 }
 
 func (u *User) CanMove() bool {
-	return (u.Permission>>5)&1 == 1
+	return CanMove(u.Permission)
+}
+
+func CanCopy(permission int32) bool {
+	return (permission>>6)&1 == 1
 }
 
 func (u *User) CanCopy() bool {
-	return (u.Permission>>6)&1 == 1
+	return CanCopy(u.Permission)
+}
+
+func CanRemove(permission int32) bool {
+	return (permission>>7)&1 == 1
 }
 
 func (u *User) CanRemove() bool {
-	return (u.Permission>>7)&1 == 1
+	return CanRemove(u.Permission)
+}
+
+func CanWebdavRead(permission int32) bool {
+	return (permission>>8)&1 == 1
 }
 
 func (u *User) CanWebdavRead() bool {
-	return (u.Permission>>8)&1 == 1
+	return CanWebdavRead(u.Permission)
+}
+
+func CanWebdavManage(permission int32) bool {
+	return (permission>>9)&1 == 1
 }
 
 func (u *User) CanWebdavManage() bool {
-	return (u.Permission>>9)&1 == 1
+	return CanWebdavManage(u.Permission)
+}
+
+func CanFTPAccess(permission int32) bool {
+	return (permission>>10)&1 == 1
 }
 
 func (u *User) CanFTPAccess() bool {
-	return (u.Permission>>10)&1 == 1
+	return CanFTPAccess(u.Permission)
+}
+
+func CanFTPManage(permission int32) bool {
+	return (permission>>11)&1 == 1
 }
 
 func (u *User) CanFTPManage() bool {
-	return (u.Permission>>11)&1 == 1
+	return CanFTPManage(u.Permission)
+}
+
+func CanReadArchives(permission int32) bool {
+	return (permission>>12)&1 == 1
 }
 
 func (u *User) CanReadArchives() bool {
-	return (u.Permission>>12)&1 == 1
+	return CanReadArchives(u.Permission)
+}
+
+func CanDecompress(permission int32) bool {
+	return (permission>>13)&1 == 1
 }
 
 func (u *User) CanDecompress() bool {
-	return (u.Permission>>13)&1 == 1
+	return CanDecompress(u.Permission)
+}
+
+func CanShare(permission int32) bool {
+	return (permission>>14)&1 == 1
+}
+
+func (u *User) CanShare() bool {
+	return CanShare(u.Permission)
+}
+
+func CanCustomizeShareID(permission int32) bool {
+	return (permission>>15)&1 == 1
+}
+
+func (u *User) CanCustomizeShareID() bool {
+	return CanCustomizeShareID(u.Permission)
 }
 
 func (u *User) JoinPath(reqPath string) (string, error) {
@@ -177,5 +268,5 @@ func (u *User) WebAuthnCredentials() []webauthn.Credential {
 }
 
 func (u *User) WebAuthnIcon() string {
-	return "https://cdn.oplist.org/gh/OpenListTeam/Logo@main/logo.svg"
+	return "https://res.oplist.org/logo/logo.svg"
 }

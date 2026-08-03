@@ -15,10 +15,10 @@ type Addition struct {
 
 var config = driver.Config{
 	Name:      "Virtual",
-	OnlyLocal: true,
 	LocalSort: true,
+	OnlyProxy: true,
 	NeedMs:    true,
-	//NoCache:   true,
+	NoLinkURL: true,
 }
 
 func init() {

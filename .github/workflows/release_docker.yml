@@ -29,11 +29,8 @@ env:
   REGISTRY: ghcr.io
   ARTIFACT_NAME: 'binaries_docker_release'
   ARTIFACT_NAME_LITE: 'binaries_docker_release_lite'
-  RELEASE_PLATFORMS: 'linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/arm/v6,linux/s390x,linux/ppc64le,linux/riscv64'
+  RELEASE_PLATFORMS: 'linux/amd64,linux/arm64,linux/arm/v7,linux/386,linux/arm/v6,linux/ppc64le,linux/riscv64,linux/loong64' ### Temporarily disable Docker builds for linux/s390x architectures for unknown reasons.
   IMAGE_PUSH: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-  IMAGE_IS_PROD: ${{ github.ref_type == 'tag' || github.event.inputs.as_latest == 'true' }}
-  IMAGE_TAGS_BETA: |
-    type=raw,value=beta,enable={{is_default_branch}}
 
 permissions:
   packages: write
@@ -44,15 +41,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: 'stable'
+          go-version: '1.26'
 
       - name: Cache Musl
         id: cache-musl
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/musl-libs
           key: docker-musl-libs-v2
@@ -63,20 +60,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build go binary (beta)
-        if: env.IMAGE_IS_PROD != 'true'
-        run: bash build.sh beta docker-multiplatform
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build go binary (release)
-        if: env.IMAGE_IS_PROD == 'true'
         run: bash build.sh release docker-multiplatform
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT_NAME }}
           overwrite: true
@@ -86,19 +77,19 @@ jobs:
             !build/musl-libs/**
 
   build_binary_lite:
-    name: Build Binaries for Docker Release
+    name: Build Binaries for Docker Release (Lite)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.4'
 
       - name: Cache Musl
         id: cache-musl
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/musl-libs
           key: docker-musl-libs-v2
@@ -109,20 +100,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build go binary (beta)
-        if: env.IMAGE_IS_PROD != 'true'
-        run: bash build.sh beta lite docker-multiplatform
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build go binary (release)
-        if: env.IMAGE_IS_PROD == 'true'
         run: bash build.sh release lite docker-multiplatform
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FRONTEND_REPO: ${{ vars.FRONTEND_REPO }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARTIFACT_NAME_LITE }}
           overwrite: true
@@ -140,107 +125,115 @@ jobs:
         image: ["latest", "ffmpeg", "aria2", "aio"]
         include:
           - image: "latest"
+            base_image_tag: "base"
             build_arg: ""
             tag_favor: ""
           - image: "ffmpeg"
+            base_image_tag: "ffmpeg"
             build_arg: INSTALL_FFMPEG=true
             tag_favor: "suffix=-ffmpeg,onlatest=true"
           - image: "aria2"
+            base_image_tag: "aria2"
             build_arg: INSTALL_ARIA2=true
             tag_favor: "suffix=-aria2,onlatest=true"
           - image: "aio"
+            base_image_tag: "aio"
             build_arg: |
               INSTALL_FFMPEG=true
               INSTALL_ARIA2=true
             tag_favor: "suffix=-aio,onlatest=true"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+        uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: 'build/'
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GitHub Container Registry
         if: env.IMAGE_PUSH == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
           tags: >
-            ${{ env.IMAGE_IS_PROD == 'true' && (
-              github.event_name == 'workflow_dispatch'
+            ${{ github.event_name == 'workflow_dispatch'
                 && format('type=raw,value={0}', github.event.inputs.manual_tag)
-              || format('type=raw,value={0}', github.ref_name)
-            ) || env.IMAGE_TAGS_BETA }}
+              || format('type=raw,value={0}', github.ref_name) }}
           flavor: |
-            latest=${{ env.IMAGE_IS_PROD }}
+            latest=${{ github.event_name == 'push' || github.event.inputs.as_latest == 'true' }}
             ${{ matrix.tag_favor }}
 
       - name: Build and push
         id: docker_build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           file: Dockerfile.ci
           push: ${{ env.IMAGE_PUSH == 'true' }}
-          build-args: ${{ matrix.build_arg }}
+          build-args: |
+            BASE_IMAGE_TAG=${{ matrix.base_image_tag }}
+            ${{ matrix.build_arg }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ env.RELEASE_PLATFORMS }}
 
   release_docker_lite:
     needs: build_binary_lite
-    name: Release Docker image
+    name: Release Docker image (Lite)
     runs-on: ubuntu-latest
     strategy:
       matrix:
         image: ["latest", "ffmpeg", "aria2", "aio"]
         include:
           - image: "latest"
+            base_image_tag: "base"
             build_arg: ""
             tag_favor: "suffix=-lite,onlatest=true"
           - image: "ffmpeg"
+            base_image_tag: "ffmpeg"
             build_arg: INSTALL_FFMPEG=true
             tag_favor: "suffix=-lite-ffmpeg,onlatest=true"
           - image: "aria2"
+            base_image_tag: "aria2"
             build_arg: INSTALL_ARIA2=true
             tag_favor: "suffix=-lite-aria2,onlatest=true"
           - image: "aio"
+            base_image_tag: "aio"
             build_arg: |
               INSTALL_FFMPEG=true
               INSTALL_ARIA2=true
             tag_favor: "suffix=-lite-aio,onlatest=true"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+        uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ env.ARTIFACT_NAME_LITE }}
           path: 'build/'
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GitHub Container Registry
         if: env.IMAGE_PUSH == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -248,28 +241,28 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_ORG_NAME }}/${{ env.IMAGE_NAME }}
           tags: >
-            ${{ env.IMAGE_IS_PROD == 'true' && (
-              github.event_name == 'workflow_dispatch'
+            ${{ github.event_name == 'workflow_dispatch'
                 && format('type=raw,value={0}', github.event.inputs.manual_tag)
-              || format('type=raw,value={0}', github.ref_name)
-            ) || env.IMAGE_TAGS_BETA }}
+              || format('type=raw,value={0}', github.ref_name) }}
           flavor: |
-            latest=${{ env.IMAGE_IS_PROD }}
+            latest=${{ github.event_name == 'push' || github.event.inputs.as_latest == 'true' }}
             ${{ matrix.tag_favor }}
 
       - name: Build and push
         id: docker_build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           file: Dockerfile.ci
           push: ${{ env.IMAGE_PUSH == 'true' }}
-          build-args: ${{ matrix.build_arg }}
+          build-args: |
+            BASE_IMAGE_TAG=${{ matrix.base_image_tag }}
+            ${{ matrix.build_arg }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ env.RELEASE_PLATFORMS }}

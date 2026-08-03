@@ -2,8 +2,11 @@ package thunderx
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
@@ -66,12 +69,15 @@ func (x *ThunderX) Init(ctx context.Context) (err error) {
 					token, err = x.Login(x.Username, x.Password)
 					if err != nil {
 						x.GetStorage().SetStatus(fmt.Sprintf("%+v", err.Error()))
-						if token.UserID != "" {
+						if token != nil && token.UserID != "" {
 							x.SetUserID(token.UserID)
 							x.UserAgent = BuildCustomUserAgent(utils.GetMD5EncodeStr(x.Username+x.Password), ClientID, PackageName, SdkVersion, ClientVersion, PackageName, token.UserID)
 						}
 						op.MustSaveDriverStorage(x)
 					}
+				}
+				if token == nil {
+					return err
 				}
 				x.SetTokenResp(token)
 				return err
@@ -369,7 +375,7 @@ func (xc *XunLeiXCommon) Put(ctx context.Context, dstDir model.Obj, file model.F
 	gcid := file.GetHash().GetHash(hash_extend.GCID)
 	var err error
 	if len(gcid) < hash_extend.GCID.Width {
-		_, gcid, err = stream.CacheFullInTempFileAndHash(file, hash_extend.GCID, file.GetSize())
+		_, gcid, err = stream.CacheFullAndHash(file, &up, hash_extend.GCID, file.GetSize())
 		if err != nil {
 			return err
 		}
@@ -420,6 +426,32 @@ func (xc *XunLeiXCommon) Put(ctx context.Context, dstDir model.Obj, file model.F
 	return nil
 }
 
+func (xc *XunLeiXCommon) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	var about AboutResponse
+	_, err := xc.Request(API_URL+"/about", http.MethodGet, func(r *resty.Request) {
+		r.SetContext(ctx)
+	}, &about)
+	if err != nil {
+		return nil, err
+	}
+
+	total, err := strconv.ParseInt(about.Quota.Limit, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	used, err := strconv.ParseInt(about.Quota.Usage, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: total,
+			UsedSpace:  used,
+		},
+	}, nil
+}
+
 func (xc *XunLeiXCommon) getFiles(ctx context.Context, folderId string) ([]model.Obj, error) {
 	files := make([]model.Obj, 0)
 	var pageToken string
@@ -467,6 +499,9 @@ func (xc *XunLeiXCommon) SetTokenResp(tr *TokenResp) {
 
 // Request 携带Authorization和CaptchaToken的请求
 func (xc *XunLeiXCommon) Request(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
+	if xc.TokenResp == nil {
+		return nil, errs.EmptyToken
+	}
 	data, err := xc.Common.Request(url, method, func(req *resty.Request) {
 		req.SetHeaders(map[string]string{
 			"Authorization":   xc.Token(),
@@ -477,7 +512,8 @@ func (xc *XunLeiXCommon) Request(url string, method string, callback base.ReqCal
 		}
 	}, resp)
 
-	errResp, ok := err.(*ErrResp)
+	var errResp *ErrResp
+	ok := errors.As(err, &errResp)
 	if !ok {
 		return nil, err
 	}
@@ -555,4 +591,85 @@ func (xc *XunLeiXCommon) IsLogin() bool {
 	}
 	_, err := xc.Request(XLUSER_API_URL+"/user/me", http.MethodGet, nil, nil)
 	return err == nil
+}
+
+// 离线下载文件，都和Pikpak接口一致
+func (xc *XunLeiXCommon) OfflineDownload(ctx context.Context, fileUrl string, parentDir model.Obj, fileName string) (*OfflineTask, error) {
+	requestBody := base.Json{
+		"kind":        "drive#file",
+		"name":        fileName,
+		"upload_type": "UPLOAD_TYPE_URL",
+		"url": base.Json{
+			"url": fileUrl,
+		},
+		"params":    base.Json{},
+		"parent_id": parentDir.GetID(),
+	}
+	var resp OfflineDownloadResp // 一样的
+	_, err := xc.Request(FILE_API_URL, http.MethodPost, func(req *resty.Request) {
+		req.SetContext(ctx).
+			SetBody(requestBody)
+	}, &resp)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &resp.Task, err
+}
+
+// 获取离线下载任务列表
+func (xc *XunLeiXCommon) OfflineList(ctx context.Context, nextPageToken string, phase []string) ([]OfflineTask, error) {
+	res := make([]OfflineTask, 0)
+	if len(phase) == 0 {
+		phase = []string{"PHASE_TYPE_RUNNING", "PHASE_TYPE_ERROR", "PHASE_TYPE_COMPLETE", "PHASE_TYPE_PENDING"}
+	}
+	params := map[string]string{
+		"type":           "offline",
+		"thumbnail_size": "SIZE_SMALL",
+		"limit":          "10000",
+		"page_token":     nextPageToken,
+		"with":           "reference_resource",
+	}
+
+	// 处理 phase 参数
+	if len(phase) > 0 {
+		filters := base.Json{
+			"phase": map[string]string{
+				"in": strings.Join(phase, ","),
+			},
+		}
+		filtersJSON, err := json.Marshal(filters)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal filters: %w", err)
+		}
+		params["filters"] = string(filtersJSON)
+	}
+
+	var resp OfflineListResp
+	_, err := xc.Request(TASKS_API_URL, http.MethodGet, func(req *resty.Request) {
+		req.SetContext(ctx).
+			SetQueryParams(params)
+	}, &resp)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get offline list: %w", err)
+	}
+	res = append(res, resp.Tasks...)
+	return res, nil
+}
+
+func (xc *XunLeiXCommon) DeleteOfflineTasks(ctx context.Context, taskIDs []string, deleteFiles bool) error {
+	params := map[string]string{
+		"task_ids":     strings.Join(taskIDs, ","),
+		"delete_files": strconv.FormatBool(deleteFiles),
+	}
+	_, err := xc.Request(TASKS_API_URL, http.MethodDelete, func(req *resty.Request) {
+		req.SetContext(ctx).
+			SetQueryParams(params)
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("failed to delete tasks %v: %w", taskIDs, err)
+	}
+	return nil
 }

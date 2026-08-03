@@ -12,6 +12,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/pkg/cron"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
@@ -21,12 +22,12 @@ type Cloud189PC struct {
 	model.Storage
 	Addition
 
-	identity string
-
 	client *resty.Client
 
-	loginParam *LoginParam
-	tokenInfo  *AppSessionResp
+	loginParam  *LoginParam
+	qrcodeParam *QRLoginParam
+
+	tokenInfo *AppSessionResp
 
 	uploadThread int
 
@@ -35,6 +36,7 @@ type Cloud189PC struct {
 
 	storageConfig driver.Config
 	ref           *Cloud189PC
+	cron          *cron.Cron
 }
 
 func (y *Cloud189PC) Config() driver.Config {
@@ -84,14 +86,27 @@ func (y *Cloud189PC) Init(ctx context.Context) (err error) {
 			})
 		}
 
-		// 避免重复登陆
-		identity := utils.GetMD5EncodeStr(y.Username + y.Password)
-		if !y.isLogin() || y.identity != identity {
-			y.identity = identity
+		// 先尝试用Token刷新，之后尝试登陆
+		if y.Addition.AccessToken != "" {
+			y.tokenInfo = &AppSessionResp{AccessToken: y.Addition.AccessToken, RefreshToken: y.Addition.RefreshToken}
+			if err = y.refreshSession(); err != nil {
+				return err
+			}
+		} else if y.Addition.RefreshToken != "" {
+			y.tokenInfo = &AppSessionResp{RefreshToken: y.Addition.RefreshToken}
+			if err = y.refreshToken(); err != nil {
+				return err
+			}
+		} else {
 			if err = y.login(); err != nil {
-				return
+				return err
 			}
 		}
+
+		// 初始化并启动 cron 任务
+		y.cron = cron.NewCron(time.Duration(time.Minute * 5))
+		// 每5分钟执行一次 keepAlive
+		y.cron.Do(y.keepAlive)
 	}
 
 	// 处理家庭云ID
@@ -114,7 +129,7 @@ func (y *Cloud189PC) Init(ctx context.Context) (err error) {
 			utils.Log.Errorf("cleanFamilyTransferFolderError:%s", err)
 		}
 	})
-	return
+	return err
 }
 
 func (d *Cloud189PC) InitReference(storage driver.Driver) error {
@@ -128,6 +143,10 @@ func (d *Cloud189PC) InitReference(storage driver.Driver) error {
 
 func (y *Cloud189PC) Drop(ctx context.Context) error {
 	y.ref = nil
+	if y.cron != nil {
+		y.cron.Stop()
+		y.cron = nil
+	}
 	return nil
 }
 
@@ -243,6 +262,16 @@ func (y *Cloud189PC) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.
 	if err = y.WaitBatchTask("MOVE", resp.TaskID, time.Millisecond*400); err != nil {
 		return nil, err
 	}
+
+	// 跟随移动 torrent 文件
+	if !srcObj.IsDir() {
+		var srcFolderId string
+		if f, ok := srcObj.(*Cloud189File); ok {
+			srcFolderId = f.ParentID
+		}
+		y.torrentFollowMove(srcFolderId, srcObj.GetName(), dstDir)
+	}
+
 	return srcObj, nil
 }
 
@@ -257,29 +286,41 @@ func (y *Cloud189PC) Rename(ctx context.Context, srcObj model.Obj, newName strin
 		queryParam["familyId"] = y.FamilyID
 	}
 
-	var newObj model.Obj
-	switch f := srcObj.(type) {
+	switch srcObj.(type) {
 	case *Cloud189File:
 		fullUrl += "/renameFile.action"
 		queryParam["fileId"] = srcObj.GetID()
 		queryParam["destFileName"] = newName
-		newObj = &Cloud189File{Icon: f.Icon} // 复用预览
 	case *Cloud189Folder:
 		fullUrl += "/renameFolder.action"
 		queryParam["folderId"] = srcObj.GetID()
 		queryParam["destFolderName"] = newName
-		newObj = &Cloud189Folder{}
 	default:
 		return nil, errs.NotSupport
 	}
-
+	var resp RenameResp
 	_, err := y.request(fullUrl, method, func(req *resty.Request) {
 		req.SetContext(ctx).SetQueryParams(queryParam)
-	}, nil, newObj, isFamily)
+	}, nil, &resp, isFamily)
 	if err != nil {
+		if code, ok := resp.ResCode.(string); ok && code == "FileAlreadyExists" {
+			return nil, errs.ObjectAlreadyExists
+		}
 		return nil, err
 	}
-	return newObj, nil
+
+	// 跟随重命名 torrent 文件
+	if f, ok := srcObj.(*Cloud189File); ok {
+		y.torrentFollowRename(f.ParentID, srcObj.GetName(), newName)
+	}
+
+	switch f := srcObj.(type) {
+	case *Cloud189File:
+		return resp.toFile(f), nil
+	case *Cloud189Folder:
+		return resp.toFolder(), nil
+	}
+	return nil, errs.NotSupport
 }
 
 func (y *Cloud189PC) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
@@ -291,11 +332,23 @@ func (y *Cloud189PC) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 		FileName: srcObj.GetName(),
 		IsFolder: BoolToNumber(srcObj.IsDir()),
 	})
-
 	if err != nil {
 		return err
 	}
-	return y.WaitBatchTask("COPY", resp.TaskID, time.Second)
+	if err = y.WaitBatchTask("COPY", resp.TaskID, time.Second); err != nil {
+		return err
+	}
+
+	// 跟随复制 torrent 文件
+	if !srcObj.IsDir() {
+		var srcFolderId string
+		if f, ok := srcObj.(*Cloud189File); ok {
+			srcFolderId = f.ParentID
+		}
+		y.torrentFollowCopy(srcFolderId, srcObj.GetName(), dstDir)
+	}
+
+	return nil
 }
 
 func (y *Cloud189PC) Remove(ctx context.Context, obj model.Obj) error {
@@ -319,6 +372,7 @@ func (y *Cloud189PC) Put(ctx context.Context, dstDir model.Obj, stream model.Fil
 
 	// 响应时间长,按需启用
 	if y.Addition.RapidUpload && !stream.IsForceStreamUpload() {
+		// 尝试妙传
 		if newObj, err := y.RapidUpload(ctx, dstDir, stream, isFamily, overwrite); err == nil {
 			return newObj, nil
 		}
@@ -327,10 +381,11 @@ func (y *Cloud189PC) Put(ctx context.Context, dstDir model.Obj, stream model.Fil
 	uploadMethod := y.UploadMethod
 	if stream.IsForceStreamUpload() {
 		uploadMethod = "stream"
-	}
-
-	// 旧版上传家庭云也有限制
-	if uploadMethod == "old" {
+	} else if y.Addition.RapidUpload && stream.GetFile() != nil {
+		// 文件流支持随机读取，走FastUpload计算MD5并尝试秒传
+		uploadMethod = "rapid"
+	} else if uploadMethod == "old" {
+		// 旧版上传家庭云也有限制
 		return y.OldUpload(ctx, dstDir, stream, up, isFamily, overwrite)
 	}
 
@@ -396,4 +451,25 @@ func (y *Cloud189PC) Put(ctx context.Context, dstDir model.Obj, stream model.Fil
 	default:
 		return y.StreamUpload(ctx, dstDir, stream, up, isFamily, overwrite)
 	}
+}
+
+func (y *Cloud189PC) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	capacityInfo, err := y.getCapacityInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var total, used int64
+	if y.isFamily() {
+		total = capacityInfo.FamilyCapacityInfo.TotalSize
+		used = capacityInfo.FamilyCapacityInfo.UsedSize
+	} else {
+		total = capacityInfo.CloudCapacityInfo.TotalSize
+		used = capacityInfo.CloudCapacityInfo.UsedSize
+	}
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: total,
+			UsedSpace:  used,
+		},
+	}, nil
 }

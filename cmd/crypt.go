@@ -1,19 +1,17 @@
 package cmd
 
 import (
-	log "github.com/sirupsen/logrus"
-
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/spf13/cobra"
-
 	rcCrypt "github.com/rclone/rclone/backend/crypt"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/obscure"
+	log "github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
 )
 
 // encryption and decryption command format for Crypt driver
@@ -25,7 +23,7 @@ type options struct {
 
 	pwd                string //de/encrypt password
 	salt               string
-	filenameEncryption string //reference drivers\crypt\meta.go Addtion
+	filenameEncryption string //reference drivers\crypt\meta.go Addition
 	dirnameEncryption  string
 	filenameEncode     string
 	suffix             string

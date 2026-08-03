@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
+	"sync/atomic"
 	"time"
-
-	"golang.org/x/exp/constraints"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -155,51 +155,131 @@ func Retry(attempts int, sleep time.Duration, f func() error) (err error) {
 type ClosersIF interface {
 	io.Closer
 	Add(closer io.Closer)
-	AddClosers(closers Closers)
-	GetClosers() Closers
+	AddIfCloser(a any)
 }
+type Closers []io.Closer
 
-type Closers struct {
-	closers []io.Closer
+func (c *Closers) Close() error {
+	var errs []error
+	for _, closer := range *c {
+		if closer != nil {
+			errs = append(errs, closer.Close())
+		}
+	}
+	clear(*c)
+	*c = (*c)[:0]
+	return errors.Join(errs...)
 }
-
-func (c *Closers) GetClosers() Closers {
-	return *c
+func (c *Closers) Add(closer io.Closer) {
+	if closer != nil {
+		*c = append(*c, closer)
+	}
+}
+func (c *Closers) AddIfCloser(a any) {
+	if closer, ok := a.(io.Closer); ok {
+		*c = append(*c, closer)
+	}
 }
 
 var _ ClosersIF = (*Closers)(nil)
 
-func (c *Closers) Close() error {
+func NewClosers(c ...io.Closer) Closers {
+	return Closers(c)
+}
+
+type SyncClosers struct {
+	closers []io.Closer
+	ref     atomic.Int32
+}
+
+// if closed, return false
+func (c *SyncClosers) AcquireReference() bool {
+	ref := c.ref.Add(1)
+	if ref > 0 {
+		// log.Debugf("AcquireReference %p: %d", c, ref)
+		return true
+	}
+	c.ref.Store(closersClosed)
+	return false
+}
+
+const closersClosed = math.MinInt32
+
+func (c *SyncClosers) Close() error {
+	for {
+		ref := c.ref.Load()
+		if ref < 0 {
+			return nil
+		}
+		if ref > 1 {
+			if c.ref.CompareAndSwap(ref, ref-1) {
+				// log.Debugf("ReleaseReference %p: %d", c, ref)
+				return nil
+			}
+		} else if c.ref.CompareAndSwap(ref, closersClosed) {
+			break
+		}
+	}
+
+	// log.Debugf("FinalClose %p", c)
 	var errs []error
 	for _, closer := range c.closers {
 		if closer != nil {
 			errs = append(errs, closer.Close())
 		}
 	}
+	clear(c.closers)
+	c.closers = nil
 	return errors.Join(errs...)
 }
-func (c *Closers) Add(closer io.Closer) {
-	c.closers = append(c.closers, closer)
 
-}
-func (c *Closers) AddClosers(closers Closers) {
-	c.closers = append(c.closers, closers.closers...)
-}
-
-func EmptyClosers() Closers {
-	return Closers{[]io.Closer{}}
-}
-func NewClosers(c ...io.Closer) Closers {
-	return Closers{c}
+func (c *SyncClosers) Add(closer io.Closer) {
+	if closer != nil {
+		if c.ref.Load() < 0 {
+			panic("Not reusable")
+		}
+		c.closers = append(c.closers, closer)
+	}
 }
 
-func Min[T constraints.Ordered](a, b T) T {
+func (c *SyncClosers) AddIfCloser(a any) {
+	if closer, ok := a.(io.Closer); ok {
+		if c.ref.Load() < 0 {
+			panic("Not reusable")
+		}
+		c.closers = append(c.closers, closer)
+	}
+}
+
+var _ ClosersIF = (*SyncClosers)(nil)
+
+// 实现cache.Expirable接口
+func (c *SyncClosers) Expired() bool {
+	return c.ref.Load() < 0
+}
+func (c *SyncClosers) Length() int {
+	return len(c.closers)
+}
+
+func NewSyncClosers(c ...io.Closer) SyncClosers {
+	return SyncClosers{closers: c}
+}
+
+type Ordered interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr |
+		~float32 | ~float64 |
+		~string
+}
+
+func Min[T Ordered](a, b T) T {
 	if a < b {
 		return a
 	}
 	return b
 }
-func Max[T constraints.Ordered](a, b T) T {
+
+func Max[T Ordered](a, b T) T {
 	if a < b {
 		return b
 	}
@@ -215,11 +295,7 @@ var IoBuffPool = &sync.Pool{
 func CopyWithBuffer(dst io.Writer, src io.Reader) (written int64, err error) {
 	buff := IoBuffPool.Get().([]byte)
 	defer IoBuffPool.Put(buff)
-	written, err = io.CopyBuffer(dst, src, buff)
-	if err != nil {
-		return
-	}
-	return written, nil
+	return io.CopyBuffer(dst, src, buff)
 }
 
 func CopyWithBufferN(dst io.Writer, src io.Reader, n int64) (written int64, err error) {

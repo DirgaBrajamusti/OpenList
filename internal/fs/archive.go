@@ -6,12 +6,9 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
-	"mime"
-	"net/http"
 	"os"
 	stdpath "path"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,35 +19,36 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/internal/task"
+	"github.com/OpenListTeam/OpenList/v4/internal/task_group"
+	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/OpenListTeam/OpenList/v4/server/common"
+	"github.com/OpenListTeam/tache"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"github.com/OpenListTeam/tache"
 )
 
 type ArchiveDownloadTask struct {
-	task.TaskExtension
+	TaskData
 	model.ArchiveDecompressArgs
-	status       string
-	SrcObjPath   string
-	DstDirPath   string
-	srcStorage   driver.Driver
-	dstStorage   driver.Driver
-	SrcStorageMp string
-	DstStorageMp string
 }
 
 func (t *ArchiveDownloadTask) GetName() string {
-	return fmt.Sprintf("decompress [%s](%s)[%s] to [%s](%s) with password <%s>", t.SrcStorageMp, t.SrcObjPath,
-		t.InnerPath, t.DstStorageMp, t.DstDirPath, t.Password)
-}
-
-func (t *ArchiveDownloadTask) GetStatus() string {
-	return t.status
+	return fmt.Sprintf("decompress [%s](%s)[%s] to [%s](%s) with password <%s>", t.SrcStorageMp, t.SrcActualPath,
+		t.InnerPath, t.DstStorageMp, t.DstActualPath, t.Password)
 }
 
 func (t *ArchiveDownloadTask) Run() error {
-	if err := t.ReinitCtx(); err != nil {
-		return err
+	if t.SrcStorage == nil {
+		if srcStorage, _, err := op.GetStorageAndActualPath(t.SrcStorageMp); err == nil {
+			t.SrcStorage = srcStorage
+		} else {
+			return err
+		}
+		if dstStorage, _, err := op.GetStorageAndActualPath(t.DstStorageMp); err == nil {
+			t.DstStorage = dstStorage
+		} else {
+			return err
+		}
 	}
 	t.ClearEndTime()
 	t.SetStartTime(time.Now())
@@ -59,18 +57,14 @@ func (t *ArchiveDownloadTask) Run() error {
 	if err != nil {
 		return err
 	}
+	uploadTask.groupID = stdpath.Join(uploadTask.DstStorageMp, uploadTask.DstActualPath)
+	task_group.TransferCoordinator.AddTask(uploadTask.groupID, nil)
 	ArchiveContentUploadTaskManager.Add(uploadTask)
 	return nil
 }
 
 func (t *ArchiveDownloadTask) RunWithoutPushUploadTask() (*ArchiveContentUploadTask, error) {
-	var err error
-	if t.srcStorage == nil {
-		t.srcStorage, err = op.GetStorageByMountPath(t.SrcStorageMp)
-	}
-	srcObj, tool, ss, err := op.GetArchiveToolAndStream(t.Ctx(), t.srcStorage, t.SrcObjPath, model.LinkArgs{
-		Header: http.Header{},
-	})
+	srcObj, tool, ss, err := op.GetArchiveToolAndStream(t.Ctx(), t.SrcStorage, t.SrcActualPath, model.LinkArgs{})
 	if err != nil {
 		return nil, err
 	}
@@ -85,29 +79,29 @@ func (t *ArchiveDownloadTask) RunWithoutPushUploadTask() (*ArchiveContentUploadT
 	}()
 	var decompressUp model.UpdateProgress
 	if t.CacheFull {
-		var total, cur int64 = 0, 0
+		total := int64(0)
 		for _, s := range ss {
 			total += s.GetSize()
 		}
 		t.SetTotalBytes(total)
-		t.status = "getting src object"
-		for _, s := range ss {
-			if s.GetFile() == nil {
-				_, err = stream.CacheFullInTempFileAndUpdateProgress(s, func(p float64) {
-					t.SetProgress((float64(cur) + float64(s.GetSize())*p/100.0) / float64(total))
-				})
+		t.Status = "getting src object"
+		part := 100 / float64(len(ss)+1)
+		for i, s := range ss {
+			if s.GetFile() != nil {
+				continue
 			}
-			cur += s.GetSize()
+			_, err = s.CacheFullAndWriter(nil, nil)
 			if err != nil {
 				return nil, err
+			} else {
+				t.SetProgress(float64(i+1) * part)
 			}
 		}
-		t.SetProgress(100.0)
-		decompressUp = func(_ float64) {}
+		decompressUp = model.UpdateProgressWithRange(t.SetProgress, 100-part, 100)
 	} else {
 		decompressUp = t.SetProgress
 	}
-	t.status = "walking and decompressing"
+	t.Status = "walking and decompressing"
 	dir, err := os.MkdirTemp(conf.Conf.TempDir, "dir-*")
 	if err != nil {
 		return nil, err
@@ -119,14 +113,16 @@ func (t *ArchiveDownloadTask) RunWithoutPushUploadTask() (*ArchiveContentUploadT
 	baseName := strings.TrimSuffix(srcObj.GetName(), stdpath.Ext(srcObj.GetName()))
 	uploadTask := &ArchiveContentUploadTask{
 		TaskExtension: task.TaskExtension{
-			Creator: t.GetCreator(),
+			Creator: t.Creator,
+			ApiUrl:  t.ApiUrl,
 		},
-		ObjName:      baseName,
-		InPlace:      !t.PutIntoNewDir,
-		FilePath:     dir,
-		DstDirPath:   t.DstDirPath,
-		dstStorage:   t.dstStorage,
-		DstStorageMp: t.DstStorageMp,
+		ObjName:       baseName,
+		InPlace:       !t.PutIntoNewDir,
+		FilePath:      dir,
+		DstActualPath: t.DstActualPath,
+		dstStorage:    t.DstStorage,
+		DstStorageMp:  t.DstStorageMp,
+		overwrite:     t.Overwrite,
 	}
 	return uploadTask, nil
 }
@@ -135,18 +131,20 @@ var ArchiveDownloadTaskManager *tache.Manager[*ArchiveDownloadTask]
 
 type ArchiveContentUploadTask struct {
 	task.TaskExtension
-	status       string
-	ObjName      string
-	InPlace      bool
-	FilePath     string
-	DstDirPath   string
-	dstStorage   driver.Driver
-	DstStorageMp string
-	finalized    bool
+	status        string
+	ObjName       string
+	InPlace       bool
+	FilePath      string
+	DstActualPath string
+	dstStorage    driver.Driver
+	DstStorageMp  string
+	finalized     bool
+	groupID       string
+	overwrite     bool
 }
 
 func (t *ArchiveContentUploadTask) GetName() string {
-	return fmt.Sprintf("upload %s to [%s](%s)", t.ObjName, t.DstStorageMp, t.DstDirPath)
+	return fmt.Sprintf("upload %s to [%s](%s)", t.ObjName, t.DstStorageMp, t.DstActualPath)
 }
 
 func (t *ArchiveContentUploadTask) GetStatus() string {
@@ -154,33 +152,45 @@ func (t *ArchiveContentUploadTask) GetStatus() string {
 }
 
 func (t *ArchiveContentUploadTask) Run() error {
-	if err := t.ReinitCtx(); err != nil {
-		return err
-	}
 	t.ClearEndTime()
 	t.SetStartTime(time.Now())
 	defer func() { t.SetEndTime(time.Now()) }()
 	return t.RunWithNextTaskCallback(func(nextTsk *ArchiveContentUploadTask) error {
+		task_group.TransferCoordinator.AddTask(t.groupID, nil)
 		ArchiveContentUploadTaskManager.Add(nextTsk)
 		return nil
 	})
 }
 
-func (t *ArchiveContentUploadTask) RunWithNextTaskCallback(f func(nextTsk *ArchiveContentUploadTask) error) error {
-	var err error
-	if t.dstStorage == nil {
-		t.dstStorage, err = op.GetStorageByMountPath(t.DstStorageMp)
+func (t *ArchiveContentUploadTask) OnSucceeded() {
+	task_group.TransferCoordinator.Done(context.WithoutCancel(t.Ctx()), t.groupID, true)
+}
+
+func (t *ArchiveContentUploadTask) OnFailed() {
+	task_group.TransferCoordinator.Done(context.WithoutCancel(t.Ctx()), t.groupID, false)
+}
+
+func (t *ArchiveContentUploadTask) SetRetry(retry int, maxRetry int) {
+	t.TaskExtension.SetRetry(retry, maxRetry)
+	if retry == 0 &&
+		(len(t.groupID) == 0 || // 重启恢复
+			(t.GetErr() == nil && t.GetState() != tache.StatePending)) { // 手动重试
+		t.groupID = stdpath.Join(t.DstStorageMp, t.DstActualPath)
+		task_group.TransferCoordinator.AddTask(t.groupID, nil)
 	}
+}
+
+func (t *ArchiveContentUploadTask) RunWithNextTaskCallback(f func(nextTask *ArchiveContentUploadTask) error) error {
 	info, err := os.Stat(t.FilePath)
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
 		t.status = "src object is dir, listing objs"
-		nextDstPath := t.DstDirPath
+		nextDstActualPath := t.DstActualPath
 		if !t.InPlace {
-			nextDstPath = stdpath.Join(nextDstPath, t.ObjName)
-			err = op.MakeDir(t.Ctx(), t.dstStorage, nextDstPath)
+			nextDstActualPath = stdpath.Join(nextDstActualPath, t.ObjName)
+			err = op.MakeDir(t.Ctx(), t.dstStorage, nextDstActualPath)
 			if err != nil {
 				return err
 			}
@@ -188,6 +198,9 @@ func (t *ArchiveContentUploadTask) RunWithNextTaskCallback(f func(nextTsk *Archi
 		entries, err := os.ReadDir(t.FilePath)
 		if err != nil {
 			return err
+		}
+		if !t.InPlace {
+			task_group.TransferCoordinator.AppendPayload(t.groupID, task_group.DstPathToHook(nextDstActualPath))
 		}
 		var es error
 		for _, entry := range entries {
@@ -203,14 +216,17 @@ func (t *ArchiveContentUploadTask) RunWithNextTaskCallback(f func(nextTsk *Archi
 			}
 			err = f(&ArchiveContentUploadTask{
 				TaskExtension: task.TaskExtension{
-					Creator: t.GetCreator(),
+					Creator: t.Creator,
+					ApiUrl:  t.ApiUrl,
 				},
-				ObjName:      entry.Name(),
-				InPlace:      false,
-				FilePath:     nextFilePath,
-				DstDirPath:   nextDstPath,
-				dstStorage:   t.dstStorage,
-				DstStorageMp: t.DstStorageMp,
+				ObjName:       entry.Name(),
+				InPlace:       false,
+				FilePath:      nextFilePath,
+				DstActualPath: nextDstActualPath,
+				dstStorage:    t.dstStorage,
+				DstStorageMp:  t.DstStorageMp,
+				groupID:       t.groupID,
+				overwrite:     t.overwrite,
 			})
 			if err != nil {
 				es = stderrors.Join(es, err)
@@ -220,24 +236,30 @@ func (t *ArchiveContentUploadTask) RunWithNextTaskCallback(f func(nextTsk *Archi
 			return es
 		}
 	} else {
-		t.SetTotalBytes(info.Size())
+		if !t.overwrite {
+			dstPath := stdpath.Join(t.DstActualPath, t.ObjName)
+			if res, _ := op.Get(t.Ctx(), t.dstStorage, dstPath); res != nil {
+				return errs.ObjectAlreadyExists
+			}
+		}
 		file, err := os.Open(t.FilePath)
 		if err != nil {
 			return err
 		}
+		t.SetTotalBytes(info.Size())
 		fs := &stream.FileStream{
 			Obj: &model.Object{
 				Name:     t.ObjName,
 				Size:     info.Size(),
 				Modified: time.Now(),
 			},
-			Mimetype:     mime.TypeByExtension(filepath.Ext(t.ObjName)),
+			Mimetype:     utils.GetMimeType(stdpath.Ext(t.ObjName)),
 			WebPutAsTask: true,
 			Reader:       file,
 		}
 		fs.Closers.Add(file)
 		t.status = "uploading"
-		err = op.Put(t.Ctx(), t.dstStorage, t.DstDirPath, fs, t.SetProgress, true)
+		err = op.Put(context.WithValue(t.Ctx(), conf.SkipHookKey, struct{}{}), t.dstStorage, t.DstActualPath, fs, t.SetProgress)
 		if err != nil {
 			return err
 		}
@@ -274,8 +296,9 @@ func moveToTempPath(path, prefix string) (string, error) {
 
 func genTempFileName(prefix string) (string, error) {
 	retry := 0
+	t := time.Now().UnixMilli()
 	for retry < 10000 {
-		newPath := stdpath.Join(conf.Conf.TempDir, prefix+strconv.FormatUint(uint64(rand.Uint32()), 10))
+		newPath := filepath.Join(conf.Conf.TempDir, prefix+fmt.Sprintf("%x-%x", t, rand.Uint32()))
 		if _, err := os.Stat(newPath); err != nil {
 			if os.IsNotExist(err) {
 				return newPath, nil
@@ -355,33 +378,44 @@ func archiveDecompress(ctx context.Context, srcObjPath, dstDirPath string, args 
 			return nil, err
 		}
 	}
-	taskCreator, _ := ctx.Value("user").(*model.User)
 	tsk := &ArchiveDownloadTask{
-		TaskExtension: task.TaskExtension{
-			Creator: taskCreator,
+		TaskData: TaskData{
+			SrcStorage:    srcStorage,
+			DstStorage:    dstStorage,
+			SrcActualPath: srcObjActualPath,
+			DstActualPath: dstDirActualPath,
+			SrcStorageMp:  srcStorage.GetStorage().MountPath,
+			DstStorageMp:  dstStorage.GetStorage().MountPath,
 		},
 		ArchiveDecompressArgs: args,
-		srcStorage:            srcStorage,
-		dstStorage:            dstStorage,
-		SrcObjPath:            srcObjActualPath,
-		DstDirPath:            dstDirActualPath,
-		SrcStorageMp:          srcStorage.GetStorage().MountPath,
-		DstStorageMp:          dstStorage.GetStorage().MountPath,
 	}
 	if ctx.Value(conf.NoTaskKey) != nil {
+		tsk.Base.SetCtx(ctx)
 		uploadTask, err := tsk.RunWithoutPushUploadTask()
 		if err != nil {
 			return nil, errors.WithMessagef(err, "failed download [%s]", srcObjPath)
 		}
 		defer uploadTask.deleteSrcFile()
 		var callback func(t *ArchiveContentUploadTask) error
+		var hasSuccess bool
 		callback = func(t *ArchiveContentUploadTask) error {
+			t.Base.SetCtx(ctx)
 			e := t.RunWithNextTaskCallback(callback)
+			if e == nil {
+				hasSuccess = true
+			}
 			t.deleteSrcFile()
 			return e
 		}
-		return nil, uploadTask.RunWithNextTaskCallback(callback)
+		uploadTask.Base.SetCtx(ctx)
+		uploadTask.groupID = stdpath.Join(uploadTask.DstStorageMp, uploadTask.DstActualPath)
+		task_group.TransferCoordinator.AddTask(uploadTask.groupID, nil)
+		err = uploadTask.RunWithNextTaskCallback(callback)
+		task_group.TransferCoordinator.Done(context.WithoutCancel(ctx), uploadTask.groupID, hasSuccess)
+		return nil, err
 	} else {
+		tsk.Creator, _ = ctx.Value(conf.UserKey).(*model.User)
+		tsk.ApiUrl = common.GetApiUrl(ctx)
 		ArchiveDownloadTaskManager.Add(tsk)
 		return tsk, nil
 	}

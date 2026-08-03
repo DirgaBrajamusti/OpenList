@@ -3,13 +3,13 @@ package lanzou
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
@@ -42,9 +42,9 @@ func (d *LanZou) get(url string, callback base.ReqCallback) ([]byte, error) {
 func (d *LanZou) post(url string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
 	data, err := d._post(url, callback, resp, false)
 	if err == ErrCookieExpiration && d.IsAccount() {
-		if atomic.CompareAndSwapInt32(&d.flag, 0, 1) {
+		if d.flag.CompareAndSwap(0, 1) {
 			_, err2 := d.Login()
-			atomic.SwapInt32(&d.flag, 0)
+			d.flag.Swap(0)
 			if err2 != nil {
 				err = errors.Join(err, err2)
 				d.Status = err.Error()
@@ -52,7 +52,7 @@ func (d *LanZou) post(url string, callback base.ReqCallback, resp interface{}) (
 				return data, err
 			}
 		}
-		for atomic.LoadInt32(&d.flag) != 0 {
+		for d.flag.Load() != 0 {
 			runtime.Gosched()
 		}
 		return d._post(url, callback, resp, false)
@@ -94,58 +94,106 @@ func (d *LanZou) _post(url string, callback base.ReqCallback, resp interface{}, 
 	}
 }
 
+// 修复点：所有请求都自动处理 acw_sc__v2 验证和 down_ip=1
 func (d *LanZou) request(url string, method string, callback base.ReqCallback, up bool) ([]byte, error) {
 	var req *resty.Request
-	if up {
-		once.Do(func() {
-			upClient = base.NewRestyClient().SetTimeout(120 * time.Second)
+	var vs string
+	for retry := 0; retry < 3; retry++ {
+		if up {
+			once.Do(func() {
+				upClient = base.NewRestyClient().SetTimeout(120 * time.Second)
+			})
+			req = upClient.R()
+		} else {
+			req = base.RestyClient.R()
+		}
+
+		req.SetHeaders(map[string]string{
+			"Referer":    "https://pc.woozooo.com",
+			"User-Agent": d.UserAgent,
 		})
-		req = upClient.R()
-	} else {
-		req = base.RestyClient.R()
-	}
 
-	req.SetHeaders(map[string]string{
-		"Referer":    "https://pc.woozooo.com",
-		"User-Agent": d.UserAgent,
-	})
+		// 下载直链时需要加 down_ip=1
+		if strings.Contains(url, "/file/") {
+			cookie := d.Cookie
+			if cookie != "" {
+				cookie += "; "
+			}
+			cookie += "down_ip=1"
+			if vs != "" {
+				cookie += "; acw_sc__v2=" + vs
+			}
+			req.SetHeader("cookie", cookie)
+		} else if d.Cookie != "" {
+			cookie := d.Cookie
+			if vs != "" {
+				cookie += "; acw_sc__v2=" + vs
+			}
+			req.SetHeader("cookie", cookie)
+		} else if vs != "" {
+			req.SetHeader("cookie", "acw_sc__v2="+vs)
+		}
 
-	if d.Cookie != "" {
-		req.SetHeader("cookie", d.Cookie)
-	}
+		if callback != nil {
+			callback(req)
+		}
 
-	if callback != nil {
-		callback(req)
+		res, err := req.Execute(method, url)
+		if err != nil {
+			return nil, err
+		}
+		bodyStr := res.String()
+		log.Debugf("lanzou request: url=>%s ,stats=>%d ,body => %s\n", res.Request.URL, res.StatusCode(), bodyStr)
+		if strings.Contains(bodyStr, "acw_sc__v2") {
+			vs, err = CalcAcwScV2(bodyStr)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		return res.Body(), err
 	}
-
-	res, err := req.Execute(method, url)
-	if err != nil {
-		return nil, err
-	}
-	log.Debugf("lanzou request: url=>%s ,stats=>%d ,body => %s\n", res.Request.URL, res.StatusCode(), res.String())
-	return res.Body(), err
+	return nil, errors.New("acw_sc__v2 validation error")
 }
 
 func (d *LanZou) Login() ([]*http.Cookie, error) {
-	resp, err := base.NewRestyClient().SetRedirectPolicy(resty.NoRedirectPolicy()).
-		R().SetFormData(map[string]string{
-		"task":         "3",
-		"uid":          d.Account,
-		"pwd":          d.Password,
-		"setSessionId": "",
-		"setSig":       "",
-		"setScene":     "",
-		"setTocen":     "",
-		"formhash":     "",
-	}).Post("https://up.woozooo.com/mlogin.php")
-	if err != nil {
-		return nil, err
+	var vs string
+	for retry := 0; retry < 3; retry++ {
+		req := base.NewRestyClient().SetRedirectPolicy(resty.NoRedirectPolicy()).R()
+
+		// 如果已计算出 acw_sc__v2，通过 cookie 携带
+		if vs != "" {
+			req.SetHeader("cookie", "acw_sc__v2="+vs)
+		}
+
+		resp, err := req.SetFormData(map[string]string{
+			"task":         "3",
+			"uid":          d.Account,
+			"pwd":          d.Password,
+			"setSessionId": "",
+			"setSig":       "",
+			"setScene":     "",
+			"setTocen":     "",
+			"formhash":     "",
+		}).Post("https://up.woozooo.com/mlogin.php")
+		if err != nil {
+			return nil, err
+		}
+		bodyStr := resp.String()
+		if strings.Contains(bodyStr, "acw_sc__v2") {
+			vs, err = CalcAcwScV2(bodyStr)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if utils.Json.Get(resp.Body(), "zt").ToInt() != 1 {
+			return nil, fmt.Errorf("login err: %s", resp.Body())
+		}
+		d.Cookie = CookieToString(resp.Cookies())
+		return resp.Cookies(), nil
 	}
-	if utils.Json.Get(resp.Body(), "zt").ToInt() != 1 {
-		return nil, fmt.Errorf("login err: %s", resp.Body())
-	}
-	d.Cookie = CookieToString(resp.Cookies())
-	return resp.Cookies(), nil
+	return nil, errors.New("acw_sc__v2 validation error")
 }
 
 /*
@@ -430,27 +478,91 @@ func (d *LanZou) getFilesByShareUrl(shareID, pwd string, sharePageData string) (
 	file.Time = timeFindReg.FindString(sharePageData)
 
 	// 重定向获取真实链接
-	res, err := base.NoRedirectClient.R().SetHeaders(map[string]string{
-		"accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-	}).Get(downloadUrl)
+	var (
+		res *resty.Response
+		err error
+	)
+	var vs string
+	var bodyStr string
+	for i := 0; i < 3; i++ {
+		res, err = base.NoRedirectClient.R().SetHeaders(map[string]string{
+			"accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+			"Referer":         baseUrl,
+		}).SetDoNotParseResponse(true).
+			SetCookie(&http.Cookie{
+				Name:  "acw_sc__v2",
+				Value: vs,
+			}).SetHeader("cookie", "down_ip=1").Get(downloadUrl)
+		if err != nil {
+			return nil, err
+		}
+
+		if res.StatusCode() == 302 {
+			if res.RawBody() != nil {
+				res.RawBody().Close()
+			}
+			break
+		}
+		bodyBytes, err := io.ReadAll(res.RawBody())
+		if res.RawBody() != nil {
+			res.RawBody().Close()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("读取响应体失败: %w", err)
+		}
+		bodyStr = string(bodyBytes)
+		if strings.Contains(bodyStr, "acw_sc__v2") {
+			if vs, err = CalcAcwScV2(bodyStr); err != nil {
+				log.Errorf("lanzou: err => acw_sc__v2 validation error  ,data => %s\n", bodyStr)
+				return nil, err
+			}
+			continue
+		}
+		break
+	}
+
 	if err != nil {
 		return nil, err
 	}
 
 	file.Url = res.Header().Get("location")
 
-	// 触发验证
-	rPageData := res.String()
+	// 触发二次验证，也需要处理一下触发acw_sc__v2的情况
 	if res.StatusCode() != 302 {
-		param, err = htmlJsonToMap(rPageData)
+		param, err = htmlJsonToMap(bodyStr)
 		if err != nil {
 			return nil, err
 		}
 		param["el"] = "2"
 		time.Sleep(time.Second * 2)
 
-		// 通过验证获取直连
-		data, err := d.post(fmt.Sprint(baseUrl, "/ajax.php"), func(req *resty.Request) { req.SetFormData(param) }, nil)
+		// 通过验证获取直链
+		var data []byte
+		for i := 0; i < 3; i++ {
+			data, err = d.post(fmt.Sprint(baseUrl, "/ajax.php"), func(req *resty.Request) {
+				req.SetFormData(param)
+				req.SetHeader("cookie", "down_ip=1")
+				if vs != "" {
+					req.SetCookie(&http.Cookie{
+						Name:  "acw_sc__v2",
+						Value: vs,
+					})
+				}
+			}, nil)
+			if err != nil {
+				return nil, err
+			}
+			ajaxBodyStr := string(data)
+			if strings.Contains(ajaxBodyStr, "acw_sc__v2") {
+				if vs, err = CalcAcwScV2(ajaxBodyStr); err != nil {
+					log.Errorf("lanzou: err => acw_sc__v2 validation error  ,data => %s\n", ajaxBodyStr)
+					return nil, err
+				}
+				time.Sleep(time.Second * 2)
+				continue
+			}
+			break
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -478,14 +590,14 @@ func (d *LanZou) getFolderByShareUrl(pwd string, sharePageData string) ([]FileOr
 
 	files := make([]FileOrFolderByShareUrl, 0)
 	// vip获取文件夹
-	floders := findSubFolderReg.FindAllStringSubmatch(sharePageData, -1)
-	for _, floder := range floders {
-		if len(floder) == 3 {
+	folders := findSubFolderReg.FindAllStringSubmatch(sharePageData, -1)
+	for _, folder := range folders {
+		if len(folder) == 3 {
 			files = append(files, FileOrFolderByShareUrl{
 				// Pwd: pwd, // 子文件夹不加密
-				ID:       floder[1],
-				NameAll:  floder[2],
-				IsFloder: true,
+				ID:       folder[1],
+				NameAll:  folder[2],
+				IsFolder: true,
 			})
 		}
 	}

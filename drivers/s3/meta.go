@@ -21,6 +21,9 @@ type Addition struct {
 	ListObjectVersion        string `json:"list_object_version" type:"select" options:"v1,v2" default:"v1"`
 	RemoveBucket             bool   `json:"remove_bucket" help:"Remove bucket name from path when using custom host."`
 	AddFilenameToDisposition bool   `json:"add_filename_to_disposition" help:"Add filename to Content-Disposition header."`
+	EnableDirectUpload       bool   `json:"enable_direct_upload" default:"false"`
+	DirectUploadHost         string `json:"direct_upload_host" required:"false"`
+	UserAgent                string `json:"user_agent" required:"false" default:"" help:"Custom User-Agent for S3 requests."`
 }
 
 func init() {

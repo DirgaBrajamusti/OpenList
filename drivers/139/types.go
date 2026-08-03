@@ -9,6 +9,7 @@ const (
 	MetaFamily      string = "family"
 	MetaGroup       string = "group"
 	MetaPersonalNew string = "personal_new"
+	MetaShare       string = "share"
 )
 
 type BaseResp struct {
@@ -285,6 +286,56 @@ type PersonalUploadUrlResp struct {
 	}
 }
 
+type ShareCatalog struct {
+	CaID   string `json:"caId"`
+	CaName string `json:"caName"`
+	UdTime string `json:"udTime"`
+}
+
+type ShareContent struct {
+	CoID        string `json:"coId"`
+	CoName      string `json:"coName"`
+	CoSize      int64  `json:"coSize"`
+	CoType      int    `json:"coType"`
+	UdTime      string `json:"udTime"`
+	CoPath      string `json:"coPath"`
+	PresentURL  string `json:"presentURL"`
+	DownloadURL string `json:"downloadURL"`
+}
+
+type ShareListResp struct {
+	BaseResp
+	Data struct {
+		LKName string         `json:"lkName"`
+		Passwd string         `json:"password"`
+		CaLst  []ShareCatalog `json:"caLst"`
+		CoLst  []ShareContent `json:"coLst"`
+	} `json:"data"`
+}
+
+type ShareContentInfo struct {
+	PresentURL  string `json:"presentURL"`
+	DownloadURL string `json:"cdnDownLoadUrl"`
+}
+
+type ShareDownloadResp struct {
+	BaseResp
+	Data struct {
+		DownloadURL string `json:"downloadURL"`
+		RedrURL     string `json:"redrUrl"`
+		ExtInfo     struct {
+			CDNDownloadURL string `json:"cdnDownloadUrl"`
+		} `json:"extInfo"`
+	} `json:"data"`
+}
+
+type ShareContentInfoResp struct {
+	BaseResp
+	Data struct {
+		ContentInfo ShareContentInfo `json:"contentInfo"`
+	} `json:"data"`
+}
+
 type QueryRoutePolicyResp struct {
 	Success bool   `json:"success"`
 	Code    string `json:"code"`
@@ -311,4 +362,76 @@ type RefreshTokenResp struct {
 	Expiretime  int32    `xml:"expiretime"`
 	AccessToken string   `xml:"accessToken"`
 	Desc        string   `xml:"desc"`
+}
+
+type DiskQuotaDetail struct {
+	BaseResp
+	Data struct {
+		FreeDiskSize int64 `json:"freeDiskSize"`
+		DiskSize     int64 `json:"diskSize"`
+		// QuotaList    []struct {
+		// 	DriveType int    `json:"driveType"`
+		// 	DriveName string `json:"driveName"`
+		// 	UsedSize  int64  `json:"usedSize"`
+		// } `json:"quotaList"`
+	} `json:"data"`
+}
+
+type AndAlbumUploadResp struct {
+	Result struct {
+		ResultCode string `json:"resultCode"`
+		ResultDesc string `json:"resultDesc"`
+	} `json:"result"`
+	UploadResult struct {
+		UploadTaskID     string `json:"uploadTaskID"`
+		RedirectionURL   string `json:"redirectionUrl"`
+		NewContentIDList []struct {
+			ContentID   string `json:"contentID"`
+			ContentName string `json:"contentName"`
+		} `json:"newContentIDList"`
+	} `json:"uploadResult"`
+}
+
+type ModifyCloudDocV2Req struct {
+	CatalogType       int    `json:"catalogType"`
+	CloudID           string `json:"cloudID"`
+	CommonAccountInfo struct {
+		Account     string `json:"account"`
+		AccountType string `json:"accountType"`
+	} `json:"commonAccountInfo"`
+	DocLibName   string `json:"docLibName"`
+	DocLibraryID string `json:"docLibraryID"`
+	Path         string `json:"path"`
+}
+
+type ModifyCloudDocV2Resp struct {
+	Result struct {
+		ResultCode string `json:"resultCode"`
+		ResultDesc string `json:"resultDesc"`
+	} `json:"result"`
+}
+
+type CreateBatchOprTaskReq struct {
+	CatalogList       []string `json:"catalogList"`
+	CommonAccountInfo struct {
+		Account     string `json:"account"`
+		AccountType string `json:"accountType"`
+	} `json:"commonAccountInfo"`
+	ContentList       []string `json:"contentList"`
+	DestCatalogID     string   `json:"destCatalogID"`
+	DestGroupID       string   `json:"destGroupID"`
+	DestPath          string   `json:"destPath"`
+	DestType          int      `json:"destType"`
+	SourceCatalogType int      `json:"sourceCatalogType"`
+	SourceCloudID     string   `json:"sourceCloudID"`
+	SourceType        int      `json:"sourceType"`
+	TaskType          int      `json:"taskType"`
+}
+
+type CreateBatchOprTaskResp struct {
+	Result struct {
+		ResultCode string `json:"resultCode"`
+		ResultDesc string `json:"resultDesc"`
+	} `json:"result"`
+	TaskID string `json:"taskID"`
 }

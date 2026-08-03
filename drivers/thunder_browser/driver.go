@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
+	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	streamPkg "github.com/OpenListTeam/OpenList/v4/internal/stream"
@@ -85,6 +87,9 @@ func (x *ThunderBrowser) Init(ctx context.Context) (err error) {
 					}
 					// 清空 信任密钥
 					x.Addition.CreditKey = ""
+				}
+				if token == nil {
+					return err
 				}
 				x.SetTokenResp(token)
 				return err
@@ -491,7 +496,7 @@ func (xc *XunLeiBrowserCommon) Put(ctx context.Context, dstDir model.Obj, stream
 	gcid := stream.GetHash().GetHash(hash_extend.GCID)
 	var err error
 	if len(gcid) < hash_extend.GCID.Width {
-		_, gcid, err = streamPkg.CacheFullInTempFileAndHash(stream, hash_extend.GCID, stream.GetSize())
+		_, gcid, err = streamPkg.CacheFullAndHash(stream, &up, hash_extend.GCID, stream.GetSize())
 		if err != nil {
 			return err
 		}
@@ -540,6 +545,32 @@ func (xc *XunLeiBrowserCommon) Put(ctx context.Context, dstDir model.Obj, stream
 		return err
 	}
 	return nil
+}
+
+func (xc *XunLeiBrowserCommon) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	var about AboutResponse
+	_, err := xc.Request(API_URL+"/about", http.MethodGet, func(r *resty.Request) {
+		r.SetContext(ctx)
+	}, &about)
+	if err != nil {
+		return nil, err
+	}
+
+	total, err := strconv.ParseInt(about.Quota.Limit, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	used, err := strconv.ParseInt(about.Quota.Usage, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: total,
+			UsedSpace:  used,
+		},
+	}, nil
 }
 
 func (xc *XunLeiBrowserCommon) getFiles(ctx context.Context, dir model.Obj, path string) ([]model.Obj, error) {
@@ -612,6 +643,9 @@ func (xc *XunLeiBrowserCommon) SetSpaceTokenResp(spaceToken string) {
 
 // Request 携带Authorization和CaptchaToken的请求
 func (xc *XunLeiBrowserCommon) Request(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
+	if xc.TokenResp == nil {
+		return nil, errs.EmptyToken
+	}
 	data, err := xc.Common.Request(url, method, func(req *resty.Request) {
 		req.SetHeaders(map[string]string{
 			"Authorization":         xc.GetToken(),
@@ -840,7 +874,7 @@ func (xc *XunLeiBrowserCommon) OfflineList(ctx context.Context, nextPageToken st
 func (xc *XunLeiBrowserCommon) DeleteOfflineTasks(ctx context.Context, taskIDs []string) error {
 	queryParams := map[string]string{
 		"task_ids": strings.Join(taskIDs, ","),
-		"_t":       fmt.Sprintf("%d", time.Now().UnixMilli()),
+		"_t":       strconv.FormatInt(time.Now().UnixMilli(), 10),
 	}
 	if xc.UseFluentPlay {
 		queryParams["space"] = ThunderBrowserDriveFluentPlayFolderType

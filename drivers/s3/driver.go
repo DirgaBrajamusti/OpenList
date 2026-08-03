@@ -4,30 +4,34 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/url"
 	stdpath "path"
 	"strings"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
+	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/cron"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
 type S3 struct {
 	model.Storage
 	Addition
-	Session    *session.Session
-	client     *s3.S3
-	linkClient *s3.S3
+	Session            *session.Session
+	client             *s3.S3
+	linkClient         *s3.S3
+	directUploadClient *s3.S3
 
 	config driver.Config
 	cron   *cron.Cron
@@ -53,16 +57,18 @@ func (d *S3) Init(ctx context.Context) error {
 			if err != nil {
 				log.Errorln("Doge init session error:", err)
 			}
-			d.client = d.getClient(false)
-			d.linkClient = d.getClient(true)
+			d.client = d.getClient(ClientTypeNormal)
+			d.linkClient = d.getClient(ClientTypeLink)
+			d.directUploadClient = d.getClient(ClientTypeDirectUpload)
 		})
 	}
 	err := d.initSession()
 	if err != nil {
 		return err
 	}
-	d.client = d.getClient(false)
-	d.linkClient = d.getClient(true)
+	d.client = d.getClient(ClientTypeNormal)
+	d.linkClient = d.getClient(ClientTypeLink)
+	d.directUploadClient = d.getClient(ClientTypeDirectUpload)
 	return nil
 }
 
@@ -98,6 +104,9 @@ func (d *S3) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*mo
 	}
 
 	req, _ := d.linkClient.GetObjectRequest(input)
+	if req == nil {
+		return nil, fmt.Errorf("failed to create GetObject request")
+	}
 	var link model.Link
 	var err error
 	if d.CustomHost != "" {
@@ -107,8 +116,30 @@ func (d *S3) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*mo
 			err = req.Build()
 			link.URL = req.HTTPRequest.URL.String()
 		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate link URL: %w", err)
+		}
+
 		if d.RemoveBucket {
-			link.URL = strings.Replace(link.URL, "/"+d.Bucket, "", 1)
+			parsedURL, parseErr := url.Parse(link.URL)
+			if parseErr != nil {
+				log.Errorf("Failed to parse URL for bucket removal: %v, URL: %s", parseErr, link.URL)
+				return nil, fmt.Errorf("failed to parse URL for bucket removal: %w", parseErr)
+			}
+
+			path := parsedURL.Path
+			bucketPrefix := "/" + d.Bucket
+			if strings.HasPrefix(path, bucketPrefix) {
+				path = strings.TrimPrefix(path, bucketPrefix)
+				if path == "" {
+					path = "/"
+				}
+				parsedURL.Path = path
+				link.URL = parsedURL.String()
+				log.Debugf("Removed bucket '%s' from URL path: %s -> %s", d.Bucket, bucketPrefix, path)
+			} else {
+				log.Warnf("URL path does not contain expected bucket prefix '%s': %s", bucketPrefix, path)
+			}
 		}
 	} else {
 		if common.ShouldProxy(d, fileName) {
@@ -133,7 +164,7 @@ func (d *S3) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) e
 			Name:     getPlaceholderName(d.Placeholder),
 			Modified: time.Now(),
 		},
-		Reader:   io.NopCloser(bytes.NewReader([]byte{})),
+		Reader:   bytes.NewReader([]byte{}),
 		Mimetype: "application/octet-stream",
 	}, func(float64) {})
 }
@@ -147,7 +178,7 @@ func (d *S3) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
 }
 
 func (d *S3) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
-	err := d.copy(ctx, srcObj.GetPath(), stdpath.Join(stdpath.Dir(srcObj.GetPath()), newName), srcObj.IsDir())
+	err := d.copy(ctx, srcObj.GetPath(), stdpath.Join(stdpath.Dir(srcObj.GetPath()), newName), srcObj.GetSize(), srcObj.IsDir())
 	if err != nil {
 		return err
 	}
@@ -155,14 +186,14 @@ func (d *S3) Rename(ctx context.Context, srcObj model.Obj, newName string) error
 }
 
 func (d *S3) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
-	return d.copy(ctx, srcObj.GetPath(), stdpath.Join(dstDir.GetPath(), srcObj.GetName()), srcObj.IsDir())
+	return d.copy(ctx, srcObj.GetPath(), stdpath.Join(dstDir.GetPath(), srcObj.GetName()), srcObj.GetSize(), srcObj.IsDir())
 }
 
 func (d *S3) Remove(ctx context.Context, obj model.Obj) error {
 	if obj.IsDir() {
 		return d.removeDir(ctx, obj.GetPath())
 	}
-	return d.removeFile(obj.GetPath())
+	return d.removeFile(ctx, obj.GetPath())
 }
 
 func (d *S3) Put(ctx context.Context, dstDir model.Obj, s model.FileStreamer, up driver.UpdateProgress) error {
@@ -186,4 +217,111 @@ func (d *S3) Put(ctx context.Context, dstDir model.Obj, s model.FileStreamer, up
 	return err
 }
 
+func (d *S3) GetDirectUploadTools() []string {
+	if !d.EnableDirectUpload {
+		return nil
+	}
+	return []string{"HttpDirect"}
+}
+
+func (d *S3) GetDirectUploadInfo(ctx context.Context, _ string, dstDir model.Obj, fileName string, _ int64) (any, error) {
+	if !d.EnableDirectUpload {
+		return nil, errs.NotImplement
+	}
+	path := getKey(stdpath.Join(dstDir.GetPath(), fileName), false)
+	req, _ := d.directUploadClient.PutObjectRequest(&s3.PutObjectInput{
+		Bucket: &d.Bucket,
+		Key:    &path,
+	})
+	if req == nil {
+		return nil, fmt.Errorf("failed to create PutObject request")
+	}
+	link, err := req.Presign(time.Hour * time.Duration(d.SignURLExpire))
+	if err != nil {
+		return nil, err
+	}
+	return &model.HttpDirectUploadInfo{
+		UploadURL: link,
+		Method:    "PUT",
+	}, nil
+}
+
+// implements driver.Getter interface
+func (d *S3) Get(ctx context.Context, path string) (model.Obj, error) {
+	// try to get object as a file using HeadObject
+	rootPath := d.GetRootPath()
+	// Avoid double-prepending root path when path already contains it.
+	// This happens when obj.GetPath() from a previous Get call is passed back
+	// to op.List → op.Get → d.Get.
+	if rootPath != "/" && utils.IsSubPath(rootPath, path) {
+		// path already includes the root prefix
+	} else {
+		path = stdpath.Join(rootPath, path)
+	}
+	key := getKey(path, false)
+	headInput := &s3.HeadObjectInput{
+		Bucket: &d.Bucket,
+		Key:    &key,
+	}
+	headOutput, err := d.client.HeadObjectWithContext(ctx, headInput)
+	if err == nil {
+		// Object exists as a file
+		fileName := stdpath.Base(path)
+		return &model.Object{
+			Name:     fileName,
+			Size:     *headOutput.ContentLength,
+			Modified: *headOutput.LastModified,
+			Path:     path,
+		}, nil
+	}
+	var awsErr awserr.Error
+	if errors.As(err, &awsErr) && awsErr.Code() != "NotFound" {
+		return nil, errors.WithMessage(err, "failed to head object")
+	}
+
+	// If HeadObject fails with 404, check if it's a directory
+	prefix := getKey(path, true)
+	var contents []*s3.Object
+	var commonPrefixes []*s3.CommonPrefix
+	switch d.ListObjectVersion {
+	case "v1":
+		listInput := &s3.ListObjectsInput{
+			Bucket:  &d.Bucket,
+			Prefix:  &prefix,
+			MaxKeys: aws.Int64(1), // Only need to check if at least one object exists
+		}
+		listResult, err := d.client.ListObjectsWithContext(ctx, listInput)
+		if err != nil {
+			return nil, errors.WithMessage(err, "failed to list objects with prefix")
+		}
+		contents = listResult.Contents
+		commonPrefixes = listResult.CommonPrefixes
+	case "v2":
+		listInput := &s3.ListObjectsV2Input{
+			Bucket:  &d.Bucket,
+			Prefix:  &prefix,
+			MaxKeys: aws.Int64(1),
+		}
+		listResult, err := d.client.ListObjectsV2WithContext(ctx, listInput)
+		if err != nil {
+			return nil, errors.WithMessage(err, "failed to list objects v2 with prefix")
+		}
+		contents = listResult.Contents
+		commonPrefixes = listResult.CommonPrefixes
+	default:
+		return nil, fmt.Errorf("unsupported ListObjectVersion: %s", d.ListObjectVersion)
+	}
+	if len(contents) > 0 || len(commonPrefixes) > 0 {
+		dirName := stdpath.Base(path)
+		return &model.Object{
+			Name:     dirName,
+			Modified: d.Modified,
+			IsFolder: true,
+			Path:     path,
+		}, nil
+	}
+	return nil, errs.ObjectNotFound
+}
+
 var _ driver.Driver = (*S3)(nil)
+var _ driver.Getter = (*S3)(nil)

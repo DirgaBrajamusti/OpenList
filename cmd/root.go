@@ -16,7 +16,7 @@ var RootCmd = &cobra.Command{
 	Short: "A file list program that supports multiple storage.",
 	Long: `A file list program that supports multiple storage,
 built with love by OpenListTeam.
-Complete documentation is available at https://docs.openlist.team/`,
+Complete documentation is available at https://doc.oplist.org/`,
 }
 
 func Execute() {
@@ -27,7 +27,8 @@ func Execute() {
 }
 
 func init() {
-	RootCmd.PersistentFlags().StringVar(&flags.DataDir, "data", "data", "data folder")
+	RootCmd.PersistentFlags().StringVar(&flags.DataDir, "data", "data", "data directory (relative paths are resolved against the current working directory)")
+	RootCmd.PersistentFlags().StringVar(&flags.ConfigPath, "config", "", "path to config.json (relative to current working directory; defaults to [data directory]/config.json, where [data directory] is set by --data)")
 	RootCmd.PersistentFlags().BoolVar(&flags.Debug, "debug", false, "start with debug mode")
 	RootCmd.PersistentFlags().BoolVar(&flags.NoPrefix, "no-prefix", false, "disable env prefix")
 	RootCmd.PersistentFlags().BoolVar(&flags.Dev, "dev", false, "start with dev mode")

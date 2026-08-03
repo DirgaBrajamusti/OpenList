@@ -3,10 +3,12 @@ package _189pc
 import (
 	"bytes"
 	"context"
+	sha1Pkg "crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -28,6 +30,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/errgroup"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/skip2/go-qrcode"
 
 	"github.com/avast/retry-go"
 	"github.com/go-resty/resty/v2"
@@ -53,6 +56,9 @@ const (
 	MAC = "TELEMAC"
 
 	CHANNEL_ID = "web_cloud.189.cn"
+
+	// Error codes
+	UserInvalidOpenTokenError = "UserInvalidOpenToken"
 )
 
 func (y *Cloud189PC) SignatureHeader(url, method, params string, isFamily bool) map[string]string {
@@ -85,6 +91,9 @@ func (y *Cloud189PC) EncryptParams(params Params, isFamily bool) string {
 }
 
 func (y *Cloud189PC) request(url, method string, callback base.ReqCallback, params Params, resp interface{}, isFamily ...bool) ([]byte, error) {
+	if y.getTokenInfo() == nil {
+		return nil, fmt.Errorf("login failed")
+	}
 	req := y.getClient().R().SetQueryParams(clientSuffix())
 
 	// 设置params
@@ -184,6 +193,7 @@ func (y *Cloud189PC) put(ctx context.Context, url string, headers map[string]str
 	}
 	return body, nil
 }
+
 func (y *Cloud189PC) getFiles(ctx context.Context, fileId string, isFamily bool) ([]model.Obj, error) {
 	res := make([]model.Obj, 0, 100)
 	for pageNum := 1; ; pageNum++ {
@@ -200,6 +210,7 @@ func (y *Cloud189PC) getFiles(ctx context.Context, fileId string, isFamily bool)
 			res = append(res, &resp.FileListAO.FolderList[i])
 		}
 		for i := 0; i < len(resp.FileListAO.FileList); i++ {
+			resp.FileListAO.FileList[i].ParentID = fileId
 			res = append(res, &resp.FileListAO.FileList[i])
 		}
 	}
@@ -263,7 +274,14 @@ func (y *Cloud189PC) findFileByName(ctx context.Context, searchName string, fold
 	}
 }
 
-func (y *Cloud189PC) login() (err error) {
+func (y *Cloud189PC) login() error {
+	if y.LoginType == "qrcode" {
+		return y.loginByQRCode()
+	}
+	return y.loginByPassword()
+}
+
+func (y *Cloud189PC) loginByPassword() (err error) {
 	// 初始化登陆所需参数
 	if y.loginParam == nil {
 		if err = y.initLoginParam(); err != nil {
@@ -277,10 +295,15 @@ func (y *Cloud189PC) login() (err error) {
 		// 销毁登陆参数
 		y.loginParam = nil
 		// 遇到错误，重新加载登陆参数(刷新验证码)
-		if err != nil && y.NoUseOcr {
-			if err1 := y.initLoginParam(); err1 != nil {
-				err = fmt.Errorf("err1: %s \nerr2: %s", err, err1)
+		if err != nil {
+			if y.NoUseOcr {
+				if err1 := y.initLoginParam(); err1 != nil {
+					err = fmt.Errorf("err1: %s \nerr2: %s", err, err1)
+				}
 			}
+
+			y.Status = err.Error()
+			op.MustSaveDriverStorage(y)
 		}
 	}()
 
@@ -325,7 +348,7 @@ func (y *Cloud189PC) login() (err error) {
 		SetQueryParam("redirectURL", loginresp.ToUrl).
 		Post(API_URL + "/getSessionForPC.action")
 	if err != nil {
-		return
+		return err
 	}
 
 	if erron.HasError() {
@@ -333,16 +356,108 @@ func (y *Cloud189PC) login() (err error) {
 	}
 	if tokenInfo.ResCode != 0 {
 		err = fmt.Errorf(tokenInfo.ResMessage)
-		return
+		return err
 	}
+	y.Addition.AccessToken = tokenInfo.AccessToken
+	y.Addition.RefreshToken = tokenInfo.RefreshToken
 	y.tokenInfo = &tokenInfo
-	return
+	op.MustSaveDriverStorage(y)
+	return err
 }
 
-/* 初始化登陆需要的参数
-*  如果遇到验证码返回错误
- */
-func (y *Cloud189PC) initLoginParam() error {
+func (y *Cloud189PC) loginByQRCode() error {
+	if y.qrcodeParam == nil {
+		if err := y.initQRCodeParam(); err != nil {
+			// 二维码也通过错误返回
+			return err
+		}
+	}
+
+	var state struct {
+		Status      int    `json:"status"`
+		RedirectUrl string `json:"redirectUrl"`
+		Msg         string `json:"msg"`
+	}
+
+	now := time.Now()
+	_, err := y.client.R().
+		SetHeaders(map[string]string{
+			"Referer": AUTH_URL,
+			"Reqid":   y.qrcodeParam.ReqId,
+			"lt":      y.qrcodeParam.Lt,
+		}).
+		SetFormData(map[string]string{
+			"appId":      APP_ID,
+			"clientType": CLIENT_TYPE,
+			"returnUrl":  RETURN_URL,
+			"paramId":    y.qrcodeParam.ParamId,
+			"uuid":       y.qrcodeParam.UUID,
+			"encryuuid":  y.qrcodeParam.EncryUUID,
+			"date":       formatDate(now),
+			"timeStamp":  fmt.Sprint(now.UTC().UnixNano() / 1e6),
+		}).
+		ForceContentType("application/json;charset=UTF-8").
+		SetResult(&state).
+		Post(AUTH_URL + "/api/logbox/oauth2/qrcodeLoginState.do")
+	if err != nil {
+		return fmt.Errorf("failed to check QR code state: %w", err)
+	}
+
+	switch state.Status {
+	case 0: // 登录成功
+		var tokenInfo AppSessionResp
+		_, err = y.client.R().
+			SetResult(&tokenInfo).
+			SetQueryParams(clientSuffix()).
+			SetQueryParam("redirectURL", state.RedirectUrl).
+			Post(API_URL + "/getSessionForPC.action")
+		if err != nil {
+			return err
+		}
+		if tokenInfo.ResCode != 0 {
+			return fmt.Errorf(tokenInfo.ResMessage)
+		}
+		y.Addition.AccessToken = tokenInfo.AccessToken
+		y.Addition.RefreshToken = tokenInfo.RefreshToken
+		y.tokenInfo = &tokenInfo
+		op.MustSaveDriverStorage(y)
+		return nil
+	case -11001: // 二维码过期
+		y.qrcodeParam = nil
+		return errors.New("QR code expired, please try again")
+	case -106: // 等待扫描
+		return y.genQRCode("QR code has not been scanned yet, please scan and save again")
+	case -11002: // 等待确认
+		return y.genQRCode("QR code has been scanned, please confirm the login on your phone and save again")
+	default: // 其他错误
+		y.qrcodeParam = nil
+		return fmt.Errorf("QR code login failed with status %d: %s", state.Status, state.Msg)
+	}
+}
+
+func (y *Cloud189PC) genQRCode(text string) error {
+	// 展示二维码
+	qrTemplate := `<body>
+	state: %s
+	<br><img src="data:image/jpeg;base64,%s"/>
+    <br>Or Click here: <a href="%s">Login</a>
+</body>`
+
+	// Generate QR code
+	qrCode, err := qrcode.Encode(y.qrcodeParam.UUID, qrcode.Medium, 256)
+	if err != nil {
+		return fmt.Errorf("failed to generate QR code: %v", err)
+	}
+
+	// Encode QR code to base64
+	qrCodeBase64 := base64.StdEncoding.EncodeToString(qrCode)
+
+	// Create the HTML page
+	qrPage := fmt.Sprintf(qrTemplate, text, qrCodeBase64, y.qrcodeParam.UUID)
+	return fmt.Errorf("need verify: \n%s", qrPage)
+}
+
+func (y *Cloud189PC) initBaseParams() (*BaseLoginParam, error) {
 	// 清除cookie
 	jar, _ := cookiejar.New(nil)
 	y.client.SetCookieJar(jar)
@@ -356,16 +471,29 @@ func (y *Cloud189PC) initLoginParam() error {
 		}).
 		Get(WEB_URL + "/api/portal/unifyLoginForPC.action")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	param := LoginParam{
+	return &BaseLoginParam{
 		CaptchaToken: regexp.MustCompile(`'captchaToken' value='(.+?)'`).FindStringSubmatch(res.String())[1],
 		Lt:           regexp.MustCompile(`lt = "(.+?)"`).FindStringSubmatch(res.String())[1],
 		ParamId:      regexp.MustCompile(`paramId = "(.+?)"`).FindStringSubmatch(res.String())[1],
 		ReqId:        regexp.MustCompile(`reqId = "(.+?)"`).FindStringSubmatch(res.String())[1],
-		// jRsaKey:      regexp.MustCompile(`"j_rsaKey" value="(.+?)"`).FindStringSubmatch(res.String())[1],
+	}, nil
+}
+
+/* 初始化登陆需要的参数
+ *  如果遇到验证码返回错误
+ */
+func (y *Cloud189PC) initLoginParam() error {
+	y.loginParam = nil
+
+	baseParam, err := y.initBaseParams()
+	if err != nil {
+		return err
 	}
+
+	y.loginParam = &LoginParam{BaseLoginParam: *baseParam}
 
 	// 获取rsa公钥
 	var encryptConf EncryptConfResp
@@ -377,18 +505,17 @@ func (y *Cloud189PC) initLoginParam() error {
 		return err
 	}
 
-	param.jRsaKey = fmt.Sprintf("-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----", encryptConf.Data.PubKey)
-	param.RsaUsername = encryptConf.Data.Pre + RsaEncrypt(param.jRsaKey, y.Username)
-	param.RsaPassword = encryptConf.Data.Pre + RsaEncrypt(param.jRsaKey, y.Password)
-	y.loginParam = &param
+	y.loginParam.jRsaKey = fmt.Sprintf("-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----", encryptConf.Data.PubKey)
+	y.loginParam.RsaUsername = encryptConf.Data.Pre + RsaEncrypt(y.loginParam.jRsaKey, y.Username)
+	y.loginParam.RsaPassword = encryptConf.Data.Pre + RsaEncrypt(y.loginParam.jRsaKey, y.Password)
 
 	// 判断是否需要验证码
 	resp, err := y.client.R().
-		SetHeader("REQID", param.ReqId).
+		SetHeader("REQID", y.loginParam.ReqId).
 		SetFormData(map[string]string{
 			"appKey":      APP_ID,
 			"accountType": ACCOUNT_TYPE,
-			"userName":    param.RsaUsername,
+			"userName":    y.loginParam.RsaUsername,
 		}).Post(AUTH_URL + "/api/logbox/oauth2/needcaptcha.do")
 	if err != nil {
 		return err
@@ -400,8 +527,8 @@ func (y *Cloud189PC) initLoginParam() error {
 	// 拉取验证码
 	imgRes, err := y.client.R().
 		SetQueryParams(map[string]string{
-			"token": param.CaptchaToken,
-			"REQID": param.ReqId,
+			"token": y.loginParam.CaptchaToken,
+			"REQID": y.loginParam.ReqId,
 			"rnd":   fmt.Sprint(timestamp()),
 		}).
 		Get(AUTH_URL + "/api/logbox/oauth2/picCaptcha.do")
@@ -428,10 +555,38 @@ func (y *Cloud189PC) initLoginParam() error {
 	return nil
 }
 
+// getQRCode 获取并返回二维码
+func (y *Cloud189PC) initQRCodeParam() (err error) {
+	y.qrcodeParam = nil
+
+	baseParam, err := y.initBaseParams()
+	if err != nil {
+		return err
+	}
+
+	var qrcodeParam QRLoginParam
+	_, err = y.client.R().
+		SetFormData(map[string]string{"appId": APP_ID}).
+		ForceContentType("application/json;charset=UTF-8").
+		SetResult(&qrcodeParam).
+		Post(AUTH_URL + "/api/logbox/oauth2/getUUID.do")
+	if err != nil {
+		return err
+	}
+	qrcodeParam.BaseLoginParam = *baseParam
+	y.qrcodeParam = &qrcodeParam
+
+	return y.genQRCode("please scan the QR code with the 189 Cloud app, then save the settings again.")
+}
+
 // 刷新会话
 func (y *Cloud189PC) refreshSession() (err error) {
+	return y.refreshSessionWithRetry(0)
+}
+
+func (y *Cloud189PC) refreshSessionWithRetry(retryCount int) (err error) {
 	if y.ref != nil {
-		return y.ref.refreshSession()
+		return y.ref.refreshSessionWithRetry(retryCount)
 	}
 	var erron RespErr
 	var userSessionResp UserSessionResp
@@ -448,37 +603,103 @@ func (y *Cloud189PC) refreshSession() (err error) {
 		return err
 	}
 
-	// 错误影响正常访问，下线该储存
-	defer func() {
-		if err != nil {
-			y.GetStorage().SetStatus(fmt.Sprintf("%+v", err.Error()))
-			op.MustSaveDriverStorage(y)
-		}
-	}()
-
+	// token生效刷新token
 	if erron.HasError() {
-		if erron.ResCode == "UserInvalidOpenToken" {
-			if err = y.login(); err != nil {
-				return err
-			}
+		if erron.ResCode == UserInvalidOpenTokenError {
+			return y.refreshTokenWithRetry(retryCount)
 		}
 		return &erron
 	}
 	y.tokenInfo.UserSessionResp = userSessionResp
-	return
+	return nil
+}
+
+// refreshToken 刷新token，失败时返回错误，不再直接调用login
+func (y *Cloud189PC) refreshToken() (err error) {
+	return y.refreshTokenWithRetry(0)
+}
+
+func (y *Cloud189PC) refreshTokenWithRetry(retryCount int) (err error) {
+	if y.ref != nil {
+		return y.ref.refreshTokenWithRetry(retryCount)
+	}
+
+	// 限制重试次数，避免无限递归
+	if retryCount >= 3 {
+		if y.Addition.RefreshToken != "" {
+			y.Addition.RefreshToken = ""
+			op.MustSaveDriverStorage(y)
+		}
+		return errors.New("refresh token failed after maximum retries")
+	}
+
+	var erron RespErr
+	var tokenInfo AppSessionResp
+	_, err = y.client.R().
+		SetResult(&tokenInfo).
+		ForceContentType("application/json;charset=UTF-8").
+		SetError(&erron).
+		SetFormData(map[string]string{
+			"clientId":     APP_ID,
+			"refreshToken": y.tokenInfo.RefreshToken,
+			"grantType":    "refresh_token",
+			"format":       "json",
+		}).
+		Post(AUTH_URL + "/api/oauth2/refreshToken.do")
+	if err != nil {
+		return err
+	}
+
+	// 如果刷新失败，返回错误给上层处理
+	if erron.HasError() {
+		if y.Addition.RefreshToken != "" {
+			y.Addition.RefreshToken = ""
+			op.MustSaveDriverStorage(y)
+		}
+
+		// 根据登录类型决定下一步行为
+		if y.LoginType == "qrcode" {
+			return errors.New("QR code session has expired, please re-scan the code to log in")
+		}
+		// 密码登录模式下，尝试回退到完整登录
+		return y.login()
+	}
+
+	y.Addition.AccessToken = tokenInfo.AccessToken
+	y.Addition.RefreshToken = tokenInfo.RefreshToken
+	y.tokenInfo = &tokenInfo
+	op.MustSaveDriverStorage(y)
+	return y.refreshSessionWithRetry(retryCount + 1)
+}
+
+func (y *Cloud189PC) keepAlive() {
+	_, err := y.get(API_URL+"/keepUserSession.action", func(r *resty.Request) {
+		r.SetQueryParams(clientSuffix())
+	}, nil)
+	if err != nil {
+		utils.Log.Warnf("189pc: Failed to keep user session alive: %v", err)
+		// 如果keepAlive失败，尝试刷新session
+		if refreshErr := y.refreshSession(); refreshErr != nil {
+			utils.Log.Errorf("189pc: Failed to refresh session after keepAlive error: %v", refreshErr)
+		}
+	} else {
+		utils.Log.Debugf("189pc: User session kept alive successfully.")
+	}
 }
 
 // 普通上传
 // 无法上传大小为0的文件
 func (y *Cloud189PC) StreamUpload(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress, isFamily bool, overwrite bool) (model.Obj, error) {
-	size := file.GetSize()
-	sliceSize := partSize(size)
+	// 文件大小
+	fileSize := file.GetSize()
+	// 分片大小，不得为文件大小
+	sliceSize := partSize(fileSize)
 
 	params := Params{
 		"parentFolderId": dstDir.GetID(),
 		"fileName":       url.QueryEscape(file.GetName()),
-		"fileSize":       fmt.Sprint(file.GetSize()),
-		"sliceSize":      fmt.Sprint(sliceSize),
+		"fileSize":       fmt.Sprint(fileSize),
+		"sliceSize":      fmt.Sprint(sliceSize), // 必须为特定分片大小
 		"lazyCheck":      "1",
 	}
 
@@ -487,7 +708,7 @@ func (y *Cloud189PC) StreamUpload(ctx context.Context, dstDir model.Obj, file mo
 		params.Set("familyId", y.FamilyID)
 		fullUrl += "/family"
 	} else {
-		//params.Set("extend", `{"opScene":"1","relativepath":"","rootfolderid":""}`)
+		// params.Set("extend", `{"opScene":"1","relativepath":"","rootfolderid":""}`)
 		fullUrl += "/person"
 	}
 
@@ -500,66 +721,115 @@ func (y *Cloud189PC) StreamUpload(ctx context.Context, dstDir model.Obj, file mo
 		return nil, err
 	}
 
-	threadG, upCtx := errgroup.NewGroupWithContext(ctx, y.uploadThread,
+	ss, err := stream.NewStreamSectionReader(file, int(sliceSize), &up)
+	if err != nil {
+		return nil, err
+	}
+
+	threadG, upCtx := errgroup.NewOrderedGroupWithContext(ctx, y.uploadThread,
 		retry.Attempts(3),
 		retry.Delay(time.Second),
 		retry.DelayType(retry.BackOffDelay))
 
-	count := int(size / sliceSize)
-	lastPartSize := size % sliceSize
-	if lastPartSize > 0 {
-		count++
-	} else {
+	count := 1
+	if fileSize > sliceSize {
+		count = int((fileSize + sliceSize - 1) / sliceSize)
+	}
+	lastPartSize := fileSize % sliceSize
+	if lastPartSize == 0 {
 		lastPartSize = sliceSize
 	}
-	fileMd5 := utils.MD5.NewFunc()
-	silceMd5 := utils.MD5.NewFunc()
+
 	silceMd5Hexs := make([]string, 0, count)
-	teeReader := io.TeeReader(file, io.MultiWriter(fileMd5, silceMd5))
-	byteSize := sliceSize
+	silceMd5 := utils.MD5.NewFunc()
+	var writers io.Writer = silceMd5
+
+	// 如果启用了 torrent 生成，额外计算 SHA-1 piece hash
+	generateTorrent := y.Addition.GenerateTorrent
+	pieceSHA1Hashes := make([]byte, 0, count*20)
+
+	fileMd5Hex := file.GetHash().GetHash(utils.MD5)
+	var fileMd5 hash.Hash
+	if len(fileMd5Hex) != utils.MD5.Width {
+		fileMd5 = utils.MD5.NewFunc()
+		writers = io.MultiWriter(silceMd5, fileMd5)
+	}
 	for i := 1; i <= count; i++ {
 		if utils.IsCanceled(upCtx) {
 			break
 		}
+		offset := int64((i)-1) * sliceSize
+		partSize := sliceSize
 		if i == count {
-			byteSize = lastPartSize
+			partSize = lastPartSize
 		}
-		byteData := make([]byte, byteSize)
-		// 读取块
-		silceMd5.Reset()
-		if _, err := io.ReadFull(teeReader, byteData); err != io.EOF && err != nil {
-			return nil, err
-		}
+		partInfo := ""
+		var reader io.ReadSeeker
+		threadG.GoWithLifecycle(errgroup.Lifecycle{
+			Before: func(ctx context.Context) (err error) {
+				reader, err = ss.GetSectionReader(offset, partSize)
+				if err != nil {
+					return err
+				}
+				silceMd5.Reset()
 
-		// 计算块md5并进行hex和base64编码
-		md5Bytes := silceMd5.Sum(nil)
-		silceMd5Hexs = append(silceMd5Hexs, strings.ToUpper(hex.EncodeToString(md5Bytes)))
-		partInfo := fmt.Sprintf("%d-%s", i, base64.StdEncoding.EncodeToString(md5Bytes))
+				// 如果需要生成 torrent，同时计算 SHA-1
+				var sha1Writer hash.Hash
+				var multiWriter io.Writer
+				if generateTorrent {
+					sha1Writer = sha1Pkg.New()
+					multiWriter = io.MultiWriter(writers, sha1Writer)
+				} else {
+					multiWriter = writers
+				}
 
-		threadG.Go(func(ctx context.Context) error {
-			uploadUrls, err := y.GetMultiUploadUrls(ctx, isFamily, initMultiUpload.Data.UploadFileID, partInfo)
-			if err != nil {
-				return err
-			}
+				w, err := utils.CopyWithBuffer(multiWriter, reader)
+				if w != partSize {
+					return fmt.Errorf("failed to read all data: (expect =%d, actual =%d) %w", partSize, w, err)
+				}
+				// 计算块md5并进行hex和base64编码
+				md5Bytes := silceMd5.Sum(nil)
+				silceMd5Hexs = append(silceMd5Hexs, strings.ToUpper(hex.EncodeToString(md5Bytes)))
+				partInfo = fmt.Sprintf("%d-%s", i, base64.StdEncoding.EncodeToString(md5Bytes))
 
-			// step.4 上传切片
-			uploadUrl := uploadUrls[0]
-			_, err = y.put(ctx, uploadUrl.RequestURL, uploadUrl.Headers, false,
-				driver.NewLimitedUploadStream(ctx, bytes.NewReader(byteData)), isFamily)
-			if err != nil {
-				return err
-			}
-			up(float64(threadG.Success()) * 100 / float64(count))
-			return nil
-		})
+				// 收集 SHA-1 piece hash
+				if generateTorrent && sha1Writer != nil {
+					pieceSHA1Hashes = append(pieceSHA1Hashes, sha1Writer.Sum(nil)...)
+				}
+				return nil
+			},
+			Do: func(ctx context.Context) (err error) {
+				reader.Seek(0, io.SeekStart)
+				uploadUrls, err := y.GetMultiUploadUrls(ctx, isFamily, initMultiUpload.Data.UploadFileID, partInfo)
+				if err != nil {
+					return err
+				}
+
+				// step.4 上传切片
+				uploadUrl := uploadUrls[0]
+				_, err = y.put(ctx, uploadUrl.RequestURL, uploadUrl.Headers, false, driver.NewLimitedUploadStream(ctx, reader), isFamily)
+				if err != nil {
+					return err
+				}
+				up(float64(threadG.Success()+1) * 100 / float64(count+1))
+				return nil
+			},
+			After: func(err error) {
+				ss.FreeSectionReader(reader)
+			},
+		},
+		)
 	}
 	if err = threadG.Wait(); err != nil {
 		return nil, err
 	}
+	defer up(100)
 
-	fileMd5Hex := strings.ToUpper(hex.EncodeToString(fileMd5.Sum(nil)))
+	if fileMd5 != nil {
+		fileMd5Hex = strings.ToUpper(hex.EncodeToString(fileMd5.Sum(nil)))
+	}
 	sliceMd5Hex := fileMd5Hex
-	if file.GetSize() > sliceSize {
+	if fileSize > sliceSize {
 		sliceMd5Hex = strings.ToUpper(utils.GetMD5EncodeStr(strings.Join(silceMd5Hexs, "\n")))
 	}
 
@@ -579,6 +849,45 @@ func (y *Cloud189PC) StreamUpload(ctx context.Context, dstDir model.Obj, file mo
 	if err != nil {
 		return nil, err
 	}
+
+	// 生成 torrent 文件（异步，不影响上传结果）
+	if generateTorrent && len(pieceSHA1Hashes) > 0 {
+		// 捕获必要的变量
+		capturedDstDir := dstDir
+		capturedIsFamily := isFamily
+		capturedFileName := file.GetName()
+		go func() {
+			torrentData, err := GenerateTorrent(capturedFileName, fileSize, fileMd5Hex, silceMd5Hexs, sliceSize, pieceSHA1Hashes)
+			if err != nil {
+				utils.Log.Warnf("生成 torrent 失败: %v", err)
+				return
+			}
+			infoHash, _ := GetInfoHashHex(torrentData)
+			torrentName := capturedFileName + ".cas.torrent"
+			utils.Log.Infof("已生成 torrent: %s (info_hash: %s, size: %d bytes)",
+				torrentName, infoHash, len(torrentData))
+
+			// 将 torrent 文件上传到同一目录（使用 FastUpload，因为 torrent 文件很小）
+			torrentFileStream := &stream.FileStream{
+				Ctx: context.Background(),
+				Obj: &model.Object{
+					Name:     torrentName,
+					Size:     int64(len(torrentData)),
+					IsFolder: false,
+				},
+				Reader:   bytes.NewReader(torrentData),
+				Mimetype: "application/x-bittorrent",
+			}
+			_, uploadErr := y.FastUpload(context.Background(), capturedDstDir, torrentFileStream, func(p float64) {}, capturedIsFamily, false)
+			if uploadErr != nil {
+				utils.Log.Warnf("上传 torrent 文件失败: %v", uploadErr)
+			} else {
+				utils.Log.Infof("torrent 文件已上传: %s", torrentName)
+				op.Cache.DeleteDirectory(y, capturedDstDir.GetPath())
+			}
+		}()
+	}
+
 	return resp.toFile(), nil
 }
 
@@ -602,6 +911,11 @@ func (y *Cloud189PC) RapidUpload(ctx context.Context, dstDir model.Obj, stream m
 
 // 快传
 func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress, isFamily bool, overwrite bool) (model.Obj, error) {
+	generateTorrent := y.Addition.GenerateTorrent && !isCASTorrentFile(file.GetName())
+	return y.fastUpload(ctx, dstDir, file, up, isFamily, overwrite, generateTorrent)
+}
+
+func (y *Cloud189PC) fastUpload(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress, isFamily bool, overwrite bool, generateTorrent bool) (model.Obj, error) {
 	var (
 		cache = file.GetFile()
 		tmpF  *os.File
@@ -620,15 +934,16 @@ func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file mode
 		cache = tmpF
 	}
 	sliceSize := partSize(size)
-	count := int(size / sliceSize)
+	count := 1
+	if size > sliceSize {
+		count = int((size + sliceSize - 1) / sliceSize)
+	}
 	lastSliceSize := size % sliceSize
-	if lastSliceSize > 0 {
-		count++
-	} else {
+	if lastSliceSize == 0 {
 		lastSliceSize = sliceSize
 	}
 
-	//step.1 优先计算所需信息
+	// step.1 优先计算所需信息
 	byteSize := sliceSize
 	fileMd5 := utils.MD5.NewFunc()
 	sliceMd5 := utils.MD5.NewFunc()
@@ -638,6 +953,9 @@ func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file mode
 	if tmpF != nil {
 		writers = append(writers, tmpF)
 	}
+
+	pieceSHA1Hashes := make([]byte, 0, count*20)
+
 	written := int64(0)
 	for i := 1; i <= count; i++ {
 		if utils.IsCanceled(ctx) {
@@ -648,7 +966,17 @@ func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file mode
 			byteSize = lastSliceSize
 		}
 
-		n, err := utils.CopyWithBufferN(io.MultiWriter(writers...), file, byteSize)
+		// 如果需要生成 torrent，同时计算 SHA-1
+		var sha1Writer hash.Hash
+		var multiWriter io.Writer
+		if generateTorrent {
+			sha1Writer = sha1Pkg.New()
+			multiWriter = io.MultiWriter(append(writers, sha1Writer)...)
+		} else {
+			multiWriter = io.MultiWriter(writers...)
+		}
+
+		n, err := utils.CopyWithBufferN(multiWriter, file, byteSize)
 		written += n
 		if err != nil && err != io.EOF {
 			return nil, err
@@ -657,6 +985,11 @@ func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file mode
 		sliceMd5Hexs = append(sliceMd5Hexs, strings.ToUpper(hex.EncodeToString(md5Byte)))
 		partInfos = append(partInfos, fmt.Sprint(i, "-", base64.StdEncoding.EncodeToString(md5Byte)))
 		sliceMd5.Reset()
+
+		// 收集 SHA-1 piece hash（仅在本次分片实际写入了数据时追加）
+		if generateTorrent && n > 0 {
+			pieceSHA1Hashes = append(pieceSHA1Hashes, sha1Writer.Sum(nil)...)
+		}
 	}
 
 	if tmpF != nil {
@@ -679,14 +1012,14 @@ func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file mode
 	if isFamily {
 		fullUrl += "/family"
 	} else {
-		//params.Set("extend", `{"opScene":"1","relativepath":"","rootfolderid":""}`)
+		// params.Set("extend", `{"opScene":"1","relativepath":"","rootfolderid":""}`)
 		fullUrl += "/person"
 	}
 
 	// 尝试恢复进度
 	uploadProgress, ok := base.GetUploadProgress[*UploadProgress](y, y.getTokenInfo().SessionKey, fileMd5Hex)
 	if !ok {
-		//step.2 预上传
+		// step.2 预上传
 		params := Params{
 			"parentFolderId": dstDir.GetID(),
 			"fileName":       url.QueryEscape(file.GetName()),
@@ -738,12 +1071,13 @@ func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file mode
 				}
 
 				// step.4 上传切片
-				_, err = y.put(ctx, uploadUrl.RequestURL, uploadUrl.Headers, false, io.NewSectionReader(cache, offset, byteSize), isFamily)
+				rateLimitedRd := driver.NewLimitedUploadStream(ctx, io.NewSectionReader(cache, offset, byteSize))
+				_, err = y.put(ctx, uploadUrl.RequestURL, uploadUrl.Headers, false, rateLimitedRd, isFamily)
 				if err != nil {
 					return err
 				}
 
-				up(float64(threadG.Success()) * 100 / float64(len(uploadUrls)))
+				up(float64(threadG.Success()+1) * 100 / float64(len(uploadUrls)+1))
 				uploadProgress.UploadParts[i] = ""
 				return nil
 			})
@@ -755,6 +1089,7 @@ func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file mode
 			}
 			return nil, err
 		}
+		defer up(100)
 	}
 
 	// step.5 提交
@@ -770,6 +1105,44 @@ func (y *Cloud189PC) FastUpload(ctx context.Context, dstDir model.Obj, file mode
 	if err != nil {
 		return nil, err
 	}
+
+	// 生成 torrent 文件（异步，不影响上传结果）
+	if generateTorrent && size > 0 && len(pieceSHA1Hashes) > 0 {
+		capturedDstDir := dstDir
+		capturedIsFamily := isFamily
+		capturedFileName := file.GetName()
+		go func() {
+			torrentData, err := GenerateTorrent(capturedFileName, size, fileMd5Hex, sliceMd5Hexs, sliceSize, pieceSHA1Hashes)
+			if err != nil {
+				utils.Log.Warnf("生成 torrent 失败: %v", err)
+				return
+			}
+			infoHash, _ := GetInfoHashHex(torrentData)
+			torrentName := capturedFileName + ".cas.torrent"
+			utils.Log.Infof("已生成 torrent: %s (info_hash: %s, size: %d bytes)",
+				torrentName, infoHash, len(torrentData))
+
+			// 将 torrent 文件上传到同一目录
+			torrentFileStream := &stream.FileStream{
+				Ctx: context.Background(),
+				Obj: &model.Object{
+					Name:     torrentName,
+					Size:     int64(len(torrentData)),
+					IsFolder: false,
+				},
+				Reader:   bytes.NewReader(torrentData),
+				Mimetype: "application/x-bittorrent",
+			}
+			_, uploadErr := y.fastUpload(context.Background(), capturedDstDir, torrentFileStream, func(p float64) {}, capturedIsFamily, false, false)
+			if uploadErr != nil {
+				utils.Log.Warnf("上传 torrent 文件失败: %v", uploadErr)
+			} else {
+				utils.Log.Infof("torrent 文件已上传: %s", torrentName)
+				op.Cache.DeleteDirectory(y, capturedDstDir.GetPath())
+			}
+		}()
+	}
+
 	return resp.toFile(), nil
 }
 
@@ -820,7 +1193,7 @@ func (y *Cloud189PC) GetMultiUploadUrls(ctx context.Context, isFamily bool, uplo
 
 // 旧版本上传，家庭云不支持覆盖
 func (y *Cloud189PC) OldUpload(ctx context.Context, dstDir model.Obj, file model.FileStreamer, up driver.UpdateProgress, isFamily bool, overwrite bool) (model.Obj, error) {
-	tempFile, fileMd5, err := stream.CacheFullInTempFileAndHash(file, utils.MD5)
+	tempFile, fileMd5, err := stream.CacheFullAndHash(file, &up, utils.MD5)
 	if err != nil {
 		return nil, err
 	}
@@ -914,7 +1287,6 @@ func (y *Cloud189PC) OldUploadCreate(ctx context.Context, parentID string, fileM
 			})
 		}
 	}, &uploadInfo, isFamily)
-
 	if err != nil {
 		return nil, err
 	}
@@ -1223,4 +1595,16 @@ func (y *Cloud189PC) getClient() *resty.Client {
 		return y.ref.getClient()
 	}
 	return y.client
+}
+
+func (y *Cloud189PC) getCapacityInfo(ctx context.Context) (*CapacityResp, error) {
+	fullUrl := API_URL + "/portal/getUserSizeInfo.action"
+	var resp CapacityResp
+	_, err := y.get(fullUrl, func(req *resty.Request) {
+		req.SetContext(ctx)
+	}, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }

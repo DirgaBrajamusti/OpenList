@@ -3,7 +3,6 @@ package conf
 import (
 	"path/filepath"
 
-	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils/random"
 )
 
@@ -21,9 +20,9 @@ type Database struct {
 }
 
 type Meilisearch struct {
-	Host        string `json:"host" env:"HOST"`
-	APIKey      string `json:"api_key" env:"API_KEY"`
-	IndexPrefix string `json:"index_prefix" env:"INDEX_PREFIX"`
+	Host   string `json:"host" env:"HOST"`
+	APIKey string `json:"api_key" env:"API_KEY"`
+	Index  string `json:"index" env:"INDEX"`
 }
 
 type Scheme struct {
@@ -36,15 +35,28 @@ type Scheme struct {
 	UnixFile     string `json:"unix_file" env:"UNIX_FILE"`
 	UnixFilePerm string `json:"unix_file_perm" env:"UNIX_FILE_PERM"`
 	EnableH2c    bool   `json:"enable_h2c" env:"ENABLE_H2C"`
+	EnableH3     bool   `json:"enable_h3" env:"ENABLE_H3"`
 }
 
 type LogConfig struct {
-	Enable     bool   `json:"enable" env:"LOG_ENABLE"`
-	Name       string `json:"name" env:"LOG_NAME"`
-	MaxSize    int    `json:"max_size" env:"MAX_SIZE"`
-	MaxBackups int    `json:"max_backups" env:"MAX_BACKUPS"`
-	MaxAge     int    `json:"max_age" env:"MAX_AGE"`
-	Compress   bool   `json:"compress" env:"COMPRESS"`
+	Enable     bool            `json:"enable" env:"ENABLE"`
+	Name       string          `json:"name" env:"NAME"`
+	MaxSize    int             `json:"max_size" env:"MAX_SIZE"`
+	MaxBackups int             `json:"max_backups" env:"MAX_BACKUPS"`
+	MaxAge     int             `json:"max_age" env:"MAX_AGE"`
+	Compress   bool            `json:"compress" env:"COMPRESS"`
+	Filter     LogFilterConfig `json:"filter" envPrefix:"FILTER_"`
+}
+
+type LogFilterConfig struct {
+	Enable  bool     `json:"enable" env:"ENABLE"`
+	Filters []Filter `json:"filters"`
+}
+
+type Filter struct {
+	CIDR   string `json:"cidr"`
+	Path   string `json:"path"`
+	Method string `json:"method"`
 }
 
 type TaskConfig struct {
@@ -94,6 +106,10 @@ type SFTP struct {
 	Listen string `json:"listen" env:"LISTEN"`
 }
 
+type MCP struct {
+	Enable bool `json:"enable" env:"ENABLE"`
+}
+
 type Config struct {
 	Force                 bool        `json:"force" env:"FORCE"`
 	SiteURL               string      `json:"site_url" env:"SITE_URL"`
@@ -106,8 +122,11 @@ type Config struct {
 	TempDir               string      `json:"temp_dir" env:"TEMP_DIR"`
 	BleveDir              string      `json:"bleve_dir" env:"BLEVE_DIR"`
 	DistDir               string      `json:"dist_dir"`
-	Log                   LogConfig   `json:"log"`
+	Log                   LogConfig   `json:"log" envPrefix:"LOG_"`
 	DelayedStart          int         `json:"delayed_start" env:"DELAYED_START"`
+	AutoMemoryLimit       int         `json:"auto_memory_limit" env:"AUTO_MEMORY_LIMIT"`
+	MinFreeMemory         int         `json:"min_free_memory" env:"MIN_FREE_MEMORY"`
+	MaxBlockLimit         int         `json:"max_block_limit" env:"MAX_BLOCK_LIMIT"`
 	MaxConnections        int         `json:"max_connections" env:"MAX_CONNECTIONS"`
 	MaxConcurrency        int         `json:"max_concurrency" env:"MAX_CONCURRENCY"`
 	TlsInsecureSkipVerify bool        `json:"tls_insecure_skip_verify" env:"TLS_INSECURE_SKIP_VERIFY"`
@@ -116,14 +135,16 @@ type Config struct {
 	S3                    S3          `json:"s3" envPrefix:"S3_"`
 	FTP                   FTP         `json:"ftp" envPrefix:"FTP_"`
 	SFTP                  SFTP        `json:"sftp" envPrefix:"SFTP_"`
+	MCP                   MCP         `json:"mcp" envPrefix:"MCP_"`
 	LastLaunchedVersion   string      `json:"last_launched_version"`
+	ProxyAddress          string      `json:"proxy_address" env:"PROXY_ADDRESS"`
 }
 
-func DefaultConfig() *Config {
-	tempDir := filepath.Join(flags.DataDir, "temp")
-	indexDir := filepath.Join(flags.DataDir, "bleve")
-	logPath := filepath.Join(flags.DataDir, "log/log.log")
-	dbPath := filepath.Join(flags.DataDir, "data.db")
+func DefaultConfig(dataDir string) *Config {
+	tempDir := filepath.Join(dataDir, "temp")
+	indexDir := filepath.Join(dataDir, "bleve")
+	logPath := filepath.Join(dataDir, "log/log.log")
+	dbPath := filepath.Join(dataDir, "data.db")
 	return &Config{
 		Scheme: Scheme{
 			Address:    "0.0.0.0",
@@ -144,7 +165,8 @@ func DefaultConfig() *Config {
 			DBFile:      dbPath,
 		},
 		Meilisearch: Meilisearch{
-			Host: "http://localhost:7700",
+			Host:  "http://localhost:7700",
+			Index: "openlist",
 		},
 		BleveDir: indexDir,
 		Log: LogConfig{
@@ -153,10 +175,19 @@ func DefaultConfig() *Config {
 			MaxSize:    50,
 			MaxBackups: 30,
 			MaxAge:     28,
+			Filter: LogFilterConfig{
+				Enable: false,
+				Filters: []Filter{
+					{Path: "/ping"},
+					{Method: "HEAD"},
+					{Path: "/dav/", Method: "PROPFIND"},
+				},
+			},
 		},
+		AutoMemoryLimit:       4,
 		MaxConnections:        0,
 		MaxConcurrency:        64,
-		TlsInsecureSkipVerify: true,
+		TlsInsecureSkipVerify: false,
 		Tasks: TasksConfig{
 			Download: TaskConfig{
 				Workers:  5,
@@ -218,6 +249,10 @@ func DefaultConfig() *Config {
 			Enable: false,
 			Listen: ":5222",
 		},
+		MCP: MCP{
+			Enable: false,
+		},
 		LastLaunchedVersion: "",
+		ProxyAddress:        "",
 	}
 }

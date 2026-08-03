@@ -151,8 +151,7 @@ func getLoginUrl(endpoint string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	domains := strings.Split(spRoot.Host, ".")
-	tld := domains[len(domains)-1]
+	tld := spRoot.Host[strings.LastIndex(spRoot.Host, ".")+1:]
 	loginUrl, ok := loginUrlsMap[tld]
 	if !ok {
 		return "", fmt.Errorf("tld %s is not supported", tld)
@@ -181,7 +180,7 @@ func (ca *CookieAuth) getSPToken() (*SuccessResponse, error) {
 
 	// Execute the first request which gives us an auth token for the sharepoint service
 	// With this token we can authenticate on the login page and save the returned cookies
-	req, err := http.NewRequest("POST", loginUrl, buf)
+	req, err := http.NewRequest(http.MethodPost, loginUrl, buf)
 	if err != nil {
 		return nil, err
 	}

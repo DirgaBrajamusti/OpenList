@@ -17,22 +17,29 @@ const (
 	AllowMounted = "allow_mounted"
 	RobotsTxt    = "robots_txt"
 
-	Logo      = "logo"
-	Favicon   = "favicon"
-	MainColor = "main_color"
+	Logo                           = "logo" // multi-lines text, L1: light, EOL: dark
+	Favicon                        = "favicon"
+	MainColor                      = "main_color"
+	HideStorageDetails             = "hide_storage_details"
+	HideStorageDetailsInManagePage = "hide_storage_details_in_manage_page"
 
 	// preview
-	TextTypes                = "text_types"
-	AudioTypes               = "audio_types"
-	VideoTypes               = "video_types"
-	ImageTypes               = "image_types"
-	ProxyTypes               = "proxy_types"
-	ProxyIgnoreHeaders       = "proxy_ignore_headers"
-	AudioAutoplay            = "audio_autoplay"
-	VideoAutoplay            = "video_autoplay"
-	PreviewArchivesByDefault = "preview_archives_by_default"
-	ReadMeAutoRender         = "readme_autorender"
-	FilterReadMeScripts      = "filter_readme_scripts"
+	TextTypes                     = "text_types"
+	AudioTypes                    = "audio_types"
+	VideoTypes                    = "video_types"
+	ImageTypes                    = "image_types"
+	ProxyTypes                    = "proxy_types"
+	ProxyIgnoreHeaders            = "proxy_ignore_headers"
+	AudioAutoplay                 = "audio_autoplay"
+	VideoAutoplay                 = "video_autoplay"
+	PreviewDownloadByDefault      = "preview_download_by_default"
+	PreviewArchivesByDefault      = "preview_archives_by_default"
+	SharePreviewDownloadByDefault = "share_preview_download_by_default"
+	SharePreviewArchivesByDefault = "share_preview_archives_by_default"
+	ReadMeAutoRender              = "readme_autorender"
+	FilterReadMeScripts           = "filter_readme_scripts"
+	NonEFSZipEncoding             = "non_efs_zip_encoding"
+
 	// global
 	HideFiles               = "hide_files"
 	CustomizeHead           = "customize_head"
@@ -45,6 +52,13 @@ const (
 	ForwardDirectLinkParams = "forward_direct_link_params"
 	IgnoreDirectLinkParams  = "ignore_direct_link_params"
 	WebauthnLoginEnabled    = "webauthn_login_enabled"
+	SharePreview            = "share_preview"
+	ShareArchivePreview     = "share_archive_preview"
+	ShareForceProxy         = "share_force_proxy"
+	ShareSummaryContent     = "share_summary_content"
+	HandleHookAfterWriting  = "handle_hook_after_writing"
+	HandleHookRateLimit     = "handle_hook_rate_limit"
+	IgnoreSystemFiles       = "ignore_system_files"
 
 	// index
 	SearchIndex     = "search_index"
@@ -63,11 +77,20 @@ const (
 	// 115
 	Pan115TempDir = "115_temp_dir"
 
+	// 123
+	Pan123TempDir = "123_temp_dir"
+
+	// 115_open
+	Pan115OpenTempDir = "115_open_temp_dir"
+
 	// pikpak
 	PikPakTempDir = "pikpak_temp_dir"
 
 	// thunder
 	ThunderTempDir = "thunder_temp_dir"
+
+	// thunderx
+	ThunderXTempDir = "thunderx_temp_dir"
 
 	// thunder_browser
 	ThunderBrowserTempDir = "thunder_browser_temp_dir"
@@ -95,6 +118,7 @@ const (
 	// ldap
 	LdapLoginEnabled      = "ldap_login_enabled"
 	LdapServer            = "ldap_server"
+	LdapSkipTlsVerify     = "ldap_skip_tls_verify"
 	LdapManagerDN         = "ldap_manager_dn"
 	LdapManagerPassword   = "ldap_manager_password"
 	LdapUserSearchBase    = "ldap_user_search_base"
@@ -112,14 +136,18 @@ const (
 	QbittorrentUrl      = "qbittorrent_url"
 	QbittorrentSeedtime = "qbittorrent_seedtime"
 
+	// 123 open offline download
+	Pan123OpenOfflineDownloadCallbackUrl = "123_open_callback_url"
+	Pan123OpenTempDir                    = "123_open_temp_dir"
+
 	// ftp
-	FTPPublicHost        = "ftp_public_host"
-	FTPPasvPortMap       = "ftp_pasv_port_map"
-	FTPProxyUserAgent    = "ftp_proxy_user_agent"
-	FTPMandatoryTLS      = "ftp_mandatory_tls"
-	FTPImplicitTLS       = "ftp_implicit_tls"
-	FTPTLSPrivateKeyPath = "ftp_tls_private_key_path"
-	FTPTLSPublicCertPath = "ftp_tls_public_cert_path"
+	FTPPublicHost            = "ftp_public_host"
+	FTPPasvPortMap           = "ftp_pasv_port_map"
+	FTPMandatoryTLS          = "ftp_mandatory_tls"
+	FTPImplicitTLS           = "ftp_implicit_tls"
+	FTPTLSPrivateKeyPath     = "ftp_tls_private_key_path"
+	FTPTLSPublicCertPath     = "ftp_tls_public_cert_path"
+	SFTPDisablePasswordLogin = "sftp_disable_password_login"
 
 	// traffic
 	TaskOfflineDownloadThreadsNum         = "offline_download_task_threads_num"
@@ -146,7 +174,21 @@ const (
 )
 
 // ContextKey is the type of context keys.
+type ContextKey int8
+
 const (
-	NoTaskKey = "no_task"
-	ApiUrlKey = "api_url"
+	_ ContextKey = iota
+
+	NoTaskKey
+	ApiUrlKey
+	UserKey
+	MetaKey
+	MetaPassKey
+	ClientIPKey
+	ProxyHeaderKey
+	RequestHeaderKey
+	UserAgentKey
+	PathKey
+	SharingIDKey
+	SkipHookKey
 )

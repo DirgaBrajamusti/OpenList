@@ -262,11 +262,12 @@ func (d *BaiduPhoto) Put(ctx context.Context, dstDir model.Obj, stream model.Fil
 
 	// 计算需要的数据
 	streamSize := stream.GetSize()
-	count := int(streamSize / DEFAULT)
+	count := 1
+	if streamSize > DEFAULT {
+		count = int((streamSize + DEFAULT - 1) / DEFAULT)
+	}
 	lastBlockSize := streamSize % DEFAULT
-	if lastBlockSize > 0 {
-		count++
-	} else {
+	if lastBlockSize == 0 {
 		lastBlockSize = DEFAULT
 	}
 
@@ -370,7 +371,7 @@ func (d *BaiduPhoto) Put(ctx context.Context, dstDir model.Obj, stream model.Fil
 				if err != nil {
 					return err
 				}
-				up(float64(threadG.Success()) * 100 / float64(len(precreateResp.BlockList)))
+				up(float64(threadG.Success()+1) * 100 / float64(len(precreateResp.BlockList)+1))
 				precreateResp.BlockList[i] = -1
 				return nil
 			})
@@ -382,6 +383,7 @@ func (d *BaiduPhoto) Put(ctx context.Context, dstDir model.Obj, stream model.Fil
 			}
 			return nil, err
 		}
+		defer up(100)
 		fallthrough
 	case 2: //step.4 创建文件
 		params["uploadid"] = precreateResp.UploadID

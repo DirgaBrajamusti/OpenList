@@ -1,29 +1,25 @@
 package op
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/db"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/singleflight"
-	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"github.com/OpenListTeam/go-cache"
 	"github.com/pkg/errors"
 )
 
-var settingCache = cache.NewMemCache(cache.WithShards[*model.SettingItem](4))
 var settingG singleflight.Group[*model.SettingItem]
 var settingCacheF = func(item *model.SettingItem) {
-	settingCache.Set(item.Key, item, cache.WithEx[*model.SettingItem](time.Hour))
+	Cache.SetSetting(item.Key, item)
 }
 
-var settingGroupCache = cache.NewMemCache(cache.WithShards[[]model.SettingItem](4))
 var settingGroupG singleflight.Group[[]model.SettingItem]
-var settingGroupCacheF = func(key string, item []model.SettingItem) {
-	settingGroupCache.Set(key, item, cache.WithEx[[]model.SettingItem](time.Hour))
+var settingGroupCacheF = func(key string, items []model.SettingItem) {
+	Cache.SetSettingGroup(key, items)
 }
 
 var settingChangingCallbacks = make([]func(), 0)
@@ -33,8 +29,7 @@ func RegisterSettingChangingCallback(f func()) {
 }
 
 func SettingCacheUpdate() {
-	settingCache.Clear()
-	settingGroupCache.Clear()
+	Cache.ClearAll()
 	for _, cb := range settingChangingCallbacks {
 		cb()
 	}
@@ -59,7 +54,7 @@ func GetSettingsMap() map[string]string {
 }
 
 func GetSettingItems() ([]model.SettingItem, error) {
-	if items, ok := settingGroupCache.Get("ALL_SETTING_ITEMS"); ok {
+	if items, exists := Cache.GetSettingGroup("ALL_SETTING_ITEMS"); exists {
 		return items, nil
 	}
 	items, err, _ := settingGroupG.Do("ALL_SETTING_ITEMS", func() ([]model.SettingItem, error) {
@@ -74,7 +69,7 @@ func GetSettingItems() ([]model.SettingItem, error) {
 }
 
 func GetPublicSettingItems() ([]model.SettingItem, error) {
-	if items, ok := settingGroupCache.Get("ALL_PUBLIC_SETTING_ITEMS"); ok {
+	if items, exists := Cache.GetSettingGroup("ALL_PUBLIC_SETTING_ITEMS"); exists {
 		return items, nil
 	}
 	items, err, _ := settingGroupG.Do("ALL_PUBLIC_SETTING_ITEMS", func() ([]model.SettingItem, error) {
@@ -89,7 +84,7 @@ func GetPublicSettingItems() ([]model.SettingItem, error) {
 }
 
 func GetSettingItemByKey(key string) (*model.SettingItem, error) {
-	if item, ok := settingCache.Get(key); ok {
+	if item, exists := Cache.GetSetting(key); exists {
 		return item, nil
 	}
 
@@ -117,8 +112,8 @@ func GetSettingItemInKeys(keys []string) ([]model.SettingItem, error) {
 }
 
 func GetSettingItemsByGroup(group int) ([]model.SettingItem, error) {
-	key := strconv.Itoa(group)
-	if items, ok := settingGroupCache.Get(key); ok {
+	key := fmt.Sprintf("GROUP_%d", group)
+	if items, exists := Cache.GetSettingGroup(key); exists {
 		return items, nil
 	}
 	items, err, _ := settingGroupG.Do(key, func() ([]model.SettingItem, error) {
@@ -134,11 +129,14 @@ func GetSettingItemsByGroup(group int) ([]model.SettingItem, error) {
 
 func GetSettingItemsInGroups(groups []int) ([]model.SettingItem, error) {
 	sort.Ints(groups)
-	key := strings.Join(utils.MustSliceConvert(groups, func(i int) string {
-		return strconv.Itoa(i)
-	}), ",")
 
-	if items, ok := settingGroupCache.Get(key); ok {
+	keyParts := make([]string, 0, len(groups))
+	for _, g := range groups {
+		keyParts = append(keyParts, strconv.Itoa(g))
+	}
+	key := "GROUPS_" + strings.Join(keyParts, "_")
+
+	if items, exists := Cache.GetSettingGroup(key); exists {
 		return items, nil
 	}
 	items, err, _ := settingGroupG.Do(key, func() ([]model.SettingItem, error) {
@@ -153,42 +151,36 @@ func GetSettingItemsInGroups(groups []int) ([]model.SettingItem, error) {
 }
 
 func SaveSettingItems(items []model.SettingItem) error {
-	noHookItems := make([]model.SettingItem, 0)
-	errs := make([]error, 0)
 	for i := range items {
-		if ok, err := HandleSettingItemHook(&items[i]); ok {
-			if err != nil {
-				errs = append(errs, err)
-			} else {
-				err = db.SaveSettingItem(&items[i])
-				if err != nil {
-					errs = append(errs, err)
-				}
-			}
-		} else {
-			noHookItems = append(noHookItems, items[i])
+		item := &items[i]
+		if it, ok := MigrationSettingItems[item.Key]; ok &&
+			item.Value == it.MigrationValue {
+			item.Value = it.Value
+		}
+		if ok, err := HandleSettingItemHook(item); ok && err != nil {
+			return fmt.Errorf("failed to execute hook on %s: %+v", item.Key, err)
 		}
 	}
-	if len(noHookItems) > 0 {
-		err := db.SaveSettingItems(noHookItems)
-		if err != nil {
-			errs = append(errs, err)
-		}
+	err := db.SaveSettingItems(items)
+	if err != nil {
+		return fmt.Errorf("failed save setting: %+v", err)
 	}
-	if len(errs) < len(items)-len(noHookItems)+1 {
-		SettingCacheUpdate()
-	}
-	return utils.MergeErrors(errs...)
+	SettingCacheUpdate()
+	return nil
 }
 
 func SaveSettingItem(item *model.SettingItem) (err error) {
+	if it, ok := MigrationSettingItems[item.Key]; ok &&
+		item.Value == it.MigrationValue {
+		item.Value = it.Value
+	}
 	// hook
 	if _, err := HandleSettingItemHook(item); err != nil {
-		return err
+		return fmt.Errorf("failed to execute hook on %s: %+v", item.Key, err)
 	}
 	// update
 	if err = db.SaveSettingItem(item); err != nil {
-		return err
+		return fmt.Errorf("failed save setting on %s: %+v", item.Key, err)
 	}
 	SettingCacheUpdate()
 	return nil
@@ -205,3 +197,9 @@ func DeleteSettingItemByKey(key string) error {
 	SettingCacheUpdate()
 	return db.DeleteSettingItemByKey(key)
 }
+
+type MigrationValueItem struct {
+	MigrationValue, Value string
+}
+
+var MigrationSettingItems map[string]MigrationValueItem

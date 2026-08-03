@@ -8,7 +8,10 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/OpenListTeam/OpenList/v4/internal/model"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
@@ -68,8 +71,16 @@ func (d *QuarkUCTV) request(ctx context.Context, pathname string, method string,
 		return nil, err
 	}
 	// 判断 是否需要 刷新 access_token
-	if e.Status == -1 && e.Errno == 10001 {
-		// token 过期
+	errInfoLower := strings.ToLower(strings.TrimSpace(e.ErrorInfo))
+	maybeTokenInvalid :=
+		(e.Status == -1 && (e.Errno == 10001 || e.Errno == 11001)) ||
+			(errInfoLower != "" &&
+				(strings.Contains(errInfoLower, "access token") ||
+					strings.Contains(errInfoLower, "access_token") ||
+					strings.Contains(errInfoLower, "token无效") ||
+					strings.Contains(errInfoLower, "token 无效")))
+	if maybeTokenInvalid {
+		// token 过期 / 无效
 		err = d.getRefreshTokenByTV(ctx, d.Addition.RefreshToken, true)
 		if err != nil {
 			return nil, err
@@ -93,7 +104,7 @@ func (d *QuarkUCTV) getLoginCode(ctx context.Context) (string, error) {
 		QrData     string `json:"qr_data"`
 		QueryToken string `json:"query_token"`
 	}
-	_, err := d.request(ctx, pathname, "GET", func(req *resty.Request) {
+	_, err := d.request(ctx, pathname, http.MethodGet, func(req *resty.Request) {
 		req.SetQueryParams(map[string]string{
 			"auth_type": "code",
 			"client_id": d.conf.clientID,
@@ -121,7 +132,7 @@ func (d *QuarkUCTV) getCode(ctx context.Context) (string, error) {
 		CommonRsp
 		Code string `json:"code"`
 	}
-	_, err := d.request(ctx, pathname, "GET", func(req *resty.Request) {
+	_, err := d.request(ctx, pathname, http.MethodGet, func(req *resty.Request) {
 		req.SetQueryParams(map[string]string{
 			"client_id":   d.conf.clientID,
 			"scope":       "netdisk",
@@ -136,7 +147,7 @@ func (d *QuarkUCTV) getCode(ctx context.Context) (string, error) {
 
 func (d *QuarkUCTV) getRefreshTokenByTV(ctx context.Context, code string, isRefresh bool) error {
 	pathname := "/token"
-	_, _, reqID := d.generateReqSign("POST", pathname, d.conf.signKey)
+	_, _, reqID := d.generateReqSign(http.MethodPost, pathname, d.conf.signKey)
 	u := d.conf.codeApi + pathname
 	var resp RefreshTokenAuthResp
 	body := map[string]string{
@@ -209,4 +220,55 @@ func (d *QuarkUCTV) generateReqSign(method string, pathname string, key string) 
 	xPanTokenHex := hex.EncodeToString(xPanToken[:])
 
 	return timestamp, xPanTokenHex, reqIDHex
+}
+
+func (d *QuarkUCTV) getTranscodingLink(ctx context.Context, file model.Obj) (*model.Link, error) {
+	var fileLink StreamingFileLink
+	_, err := d.request(ctx, "/file", "GET", func(req *resty.Request) {
+		req.SetQueryParams(map[string]string{
+			"method":     "streaming",
+			"group_by":   "source",
+			"fid":        file.GetID(),
+			"resolution": "low,normal,high,super,2k,4k",
+			"support":    "dolby_vision",
+		})
+	}, &fileLink)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, info := range fileLink.Data.VideoInfo {
+		if info.URL != "" {
+			return &model.Link{
+				URL:           info.URL,
+				ContentLength: info.Size,
+				Concurrency:   3,
+				PartSize:      10 * utils.MB,
+			}, nil
+		}
+	}
+
+	return nil, errors.New("no link found")
+}
+
+func (d *QuarkUCTV) getDownloadLink(ctx context.Context, file model.Obj) (*model.Link, error) {
+	var fileLink DownloadFileLink
+	_, err := d.request(ctx, "/file", "GET", func(req *resty.Request) {
+		req.SetQueryParams(map[string]string{
+			"method":     "download",
+			"group_by":   "source",
+			"fid":        file.GetID(),
+			"resolution": "low,normal,high,super,2k,4k",
+			"support":    "dolby_vision",
+		})
+	}, &fileLink)
+	if err != nil {
+		return nil, err
+	}
+
+	return &model.Link{
+		URL:         fileLink.Data.DownloadURL,
+		Concurrency: 3,
+		PartSize:    10 * utils.MB,
+	}, nil
 }

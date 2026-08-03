@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/OpenListTeam/OpenList/v4/server/ftp"
 	"github.com/OpenListTeam/OpenList/v4/server/sftp"
 	"github.com/OpenListTeam/sftpd-openlist"
@@ -18,16 +20,17 @@ import (
 )
 
 type SftpDriver struct {
-	proxyHeader *http.Header
+	proxyHeader http.Header
 	config      *sftpd.Config
 }
 
 func NewSftpDriver() (*SftpDriver, error) {
+	ftp.InitStage()
 	sftp.InitHostKey()
-	header := &http.Header{}
-	header.Add("User-Agent", setting.GetStr(conf.FTPProxyUserAgent))
 	return &SftpDriver{
-		proxyHeader: header,
+		proxyHeader: http.Header{
+			"User-Agent": {base.UserAgent},
+		},
 	}, nil
 }
 
@@ -35,10 +38,14 @@ func (d *SftpDriver) GetConfig() *sftpd.Config {
 	if d.config != nil {
 		return d.config
 	}
+	var pwdAuth func(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) = nil
+	if !setting.GetBool(conf.SFTPDisablePasswordLogin) {
+		pwdAuth = d.PasswordAuth
+	}
 	serverConfig := ssh.ServerConfig{
 		NoClientAuth:         true,
 		NoClientAuthCallback: d.NoClientAuth,
-		PasswordCallback:     d.PasswordAuth,
+		PasswordCallback:     pwdAuth,
 		PublicKeyCallback:    d.PublicKeyAuth,
 		AuthLogCallback:      d.AuthLogCallback,
 		BannerCallback:       d.GetBanner,
@@ -50,7 +57,7 @@ func (d *SftpDriver) GetConfig() *sftpd.Config {
 		ServerConfig: serverConfig,
 		HostPort:     conf.Conf.SFTP.Listen,
 		ErrorLogFunc: utils.Log.Error,
-		//DebugLogFunc: utils.Log.Debugf,
+		// DebugLogFunc: utils.Log.Debugf,
 	}
 	return d.config
 }
@@ -61,10 +68,10 @@ func (d *SftpDriver) GetFileSystem(sc *ssh.ServerConn) (sftpd.FileSystem, error)
 		return nil, err
 	}
 	ctx := context.Background()
-	ctx = context.WithValue(ctx, "user", userObj)
-	ctx = context.WithValue(ctx, "meta_pass", "")
-	ctx = context.WithValue(ctx, "client_ip", sc.RemoteAddr().String())
-	ctx = context.WithValue(ctx, "proxy_header", d.proxyHeader)
+	ctx = context.WithValue(ctx, conf.UserKey, userObj)
+	ctx = context.WithValue(ctx, conf.MetaPassKey, "")
+	ctx = context.WithValue(ctx, conf.ClientIPKey, sc.RemoteAddr().String())
+	ctx = context.WithValue(ctx, conf.ProxyHeaderKey, d.proxyHeader)
 	return &sftp.DriverAdapter{FtpDriver: ftp.NewAferoAdapter(ctx)}, nil
 }
 
@@ -86,17 +93,31 @@ func (d *SftpDriver) NoClientAuth(conn ssh.ConnMetadata) (*ssh.Permissions, erro
 }
 
 func (d *SftpDriver) PasswordAuth(conn ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+	ip := conn.RemoteAddr().String()
+	count, ok := model.LoginCache.Get(ip)
+	if ok && count >= model.DefaultMaxAuthRetries {
+		model.LoginCache.Expire(ip, model.DefaultLockDuration)
+		return nil, errors.New("Too many unsuccessful sign-in attempts have been made using an incorrect username or password, Try again later.")
+	}
+	pass := string(password)
 	userObj, err := op.GetUserByName(conn.User())
+	if err == nil {
+		err = userObj.ValidateRawPassword(pass)
+		if err != nil && setting.GetBool(conf.LdapLoginEnabled) && userObj.AllowLdap {
+			err = common.HandleLdapLogin(conn.User(), pass)
+		}
+	} else if setting.GetBool(conf.LdapLoginEnabled) && model.CanFTPAccess(int32(setting.GetInt(conf.LdapDefaultPermission, 0))) {
+		userObj, err = tryLdapLoginAndRegister(conn.User(), pass)
+	}
 	if err != nil {
+		model.LoginCache.Set(ip, count+1)
 		return nil, err
 	}
 	if userObj.Disabled || !userObj.CanFTPAccess() {
+		model.LoginCache.Set(ip, count+1)
 		return nil, errors.New("user is not allowed to access via SFTP")
 	}
-	passHash := model.StaticHash(string(password))
-	if err = userObj.ValidatePwdStaticHash(passHash); err != nil {
-		return nil, err
-	}
+	model.LoginCache.Del(ip)
 	return nil, nil
 }
 

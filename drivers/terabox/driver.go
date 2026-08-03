@@ -7,12 +7,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math"
 	stdpath "path"
 	"strconv"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/avast/retry-go"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
@@ -62,7 +62,9 @@ func (d *Terabox) List(ctx context.Context, dir model.Obj, args model.ListArgs) 
 		return nil, err
 	}
 	return utils.SliceConvert(files, func(src File) (model.Obj, error) {
-		return fileToObj(src), nil
+		obj := fileToObj(src)
+		obj.Path = stdpath.Join(dir.GetPath(), obj.Name)
+		return obj, nil
 	})
 }
 
@@ -178,28 +180,25 @@ func (d *Terabox) Put(ctx context.Context, dstDir model.Obj, stream model.FileSt
 	}
 
 	// upload chunks
-	tempFile, err := stream.CacheFullInTempFile()
+	tempFile, err := stream.CacheFullAndWriter(&up, nil)
 	if err != nil {
 		return err
 	}
 
 	params := map[string]string{
-		"method":     "upload",
-		"path":       path,
-		"uploadid":   precreateResp.Uploadid,
-		"app_id":     "250528",
-		"web":        "1",
-		"channel":    "dubox",
-		"clienttype": "0",
+		"method":   "upload",
+		"path":     path,
+		"uploadid": precreateResp.Uploadid,
 	}
 
 	streamSize := stream.GetSize()
 	chunkSize := calculateChunkSize(streamSize)
 	chunkByteData := make([]byte, chunkSize)
-	count := int(math.Ceil(float64(streamSize) / float64(chunkSize)))
+	count := int((streamSize + chunkSize - 1) / chunkSize)
 	left := streamSize
 	uploadBlockList := make([]string, 0, count)
 	h := md5.New()
+
 	for partseq := 0; partseq < count; partseq++ {
 		if utils.IsCanceled(ctx) {
 			return ctx.Err()
@@ -220,21 +219,39 @@ func (d *Terabox) Put(ctx context.Context, dstDir model.Obj, stream model.FileSt
 
 		// calculate md5
 		h.Write(byteData)
-		uploadBlockList = append(uploadBlockList, hex.EncodeToString(h.Sum(nil)))
+		localMD5 := hex.EncodeToString(h.Sum(nil))
+		uploadBlockList = append(uploadBlockList, localMD5)
 		h.Reset()
 
 		u := "https://" + locateupload_resp.Host + "/rest/2.0/pcs/superfile2"
 		params["partseq"] = strconv.Itoa(partseq)
-		res, err := base.RestyClient.R().
-			SetContext(ctx).
-			SetQueryParams(params).
-			SetFileReader("file", stream.GetName(), driver.NewLimitedUploadStream(ctx, bytes.NewReader(byteData))).
-			SetHeader("Cookie", d.Cookie).
-			Post(u)
+		log.Debugf("%+v", params)
+
+		err = retry.Do(
+			func() error {
+				fileReader := driver.NewLimitedUploadStream(ctx, bytes.NewReader(byteData))
+				res, err := d.post_multipart(u, params, "file", stream.GetName(), fileReader, nil)
+				log.Debugln(string(res))
+				if err != nil {
+					return err
+				}
+
+				rspmd5 := utils.Json.Get(res, "md5").ToString()
+				if localMD5 != rspmd5 {
+					log.Debugf("MD5 mismatch, our MD5: %s, server: %s", localMD5, rspmd5)
+					return fmt.Errorf("MD5 mismatch")
+				}
+				return nil
+			},
+			retry.Attempts(5),
+			retry.DelayType(retry.FixedDelay),
+			retry.Context(ctx),
+		)
+
 		if err != nil {
 			return err
 		}
-		log.Debugln(res.String())
+
 		if count > 0 {
 			up(float64(partseq) * 100 / float64(count))
 		}

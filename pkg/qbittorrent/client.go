@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
@@ -35,9 +36,21 @@ func New(webuiUrl string) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	transport := &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     30 * time.Second,
+		DisableKeepAlives:   false, // Enable connection reuse
+	}
+
 	var c = &client{
-		url:    u,
-		client: http.Client{Jar: jar},
+		url: u,
+		client: http.Client{
+			Jar:       jar,
+			Transport: transport,
+			Timeout:   30 * time.Second, // Set overall timeout
+		},
 	}
 
 	err = c.checkAuthorization()
@@ -69,6 +82,7 @@ func (c *client) authorized() bool {
 	if err != nil {
 		return false
 	}
+	defer resp.Body.Close()
 	return resp.StatusCode == 200 // the status code will be 403 if not authorized
 }
 
@@ -82,7 +96,17 @@ func (c *client) login() error {
 	if err != nil {
 		return err
 	}
+	defer resp.Body.Close()
 
+	// avoid long waiting time if being upgraded to websocket connections (e.g. 101 responses)
+	// as per API documentation, qBittorrent returns only 200 on successful login (qBittorrent < 5.2.0)
+	// qBittorrent 5.2.0 /api/v2/auth/login returns HTTP 204 on success
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return errors.New("failed to login into qBittorrent webui with status code: " + resp.Status)
+	}
+	if resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
 	// check result
 	body := make([]byte, 2)
 	_, err = resp.Body.Read(body)
@@ -99,7 +123,7 @@ func (c *client) post(path string, data url.Values) (*http.Response, error) {
 	u := c.url.JoinPath(path)
 	u.User = nil // remove userinfo for requests
 
-	req, err := http.NewRequest("POST", u.String(), bytes.NewReader([]byte(data.Encode())))
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader([]byte(data.Encode())))
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +171,7 @@ func (c *client) AddFromLink(link string, savePath string, id string) error {
 
 	u := c.url.JoinPath("/api/v2/torrents/add")
 	u.User = nil // remove userinfo for requests
-	req, err := http.NewRequest("POST", u.String(), buf)
+	req, err := http.NewRequest(http.MethodPost, u.String(), buf)
 	if err != nil {
 		return err
 	}
@@ -156,6 +180,11 @@ func (c *client) AddFromLink(link string, savePath string, id string) error {
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return err
+	}
+	defer resp.Body.Close()
+	// qBittorrent 5.2.0 returns 204 on success.
+	if resp.StatusCode != http.StatusNoContent {
+		return nil
 	}
 
 	// check result
@@ -271,6 +300,7 @@ func (c *client) GetInfo(id string) (TorrentInfo, error) {
 	if err != nil {
 		return TorrentInfo{}, err
 	}
+	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -316,6 +346,7 @@ func (c *client) GetFiles(id string) ([]FileInfo, error) {
 	if err != nil {
 		return []FileInfo{}, err
 	}
+	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -345,21 +376,23 @@ func (c *client) Delete(id string, deleteFiles bool) error {
 	} else {
 		v.Set("deleteFiles", "false")
 	}
-	response, err := c.post("/api/v2/torrents/delete", v)
+	deleteResp, err := c.post("/api/v2/torrents/delete", v)
 	if err != nil {
 		return err
 	}
-	if response.StatusCode != 200 {
+	defer deleteResp.Body.Close()
+	if deleteResp.StatusCode != 200 {
 		return errors.New("failed to delete qbittorrent task")
 	}
 
 	v = url.Values{}
 	v.Set("tags", "openlist-"+id)
-	response, err = c.post("/api/v2/torrents/deleteTags", v)
+	deleteTagsResp, err := c.post("/api/v2/torrents/deleteTags", v)
 	if err != nil {
 		return err
 	}
-	if response.StatusCode != 200 {
+	defer deleteTagsResp.Body.Close()
+	if deleteTagsResp.StatusCode != 200 {
 		return errors.New("failed to delete qbittorrent tag")
 	}
 	return nil

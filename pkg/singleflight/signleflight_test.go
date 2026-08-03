@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package singleflight
+package singleflight // import "golang.org/x/sync/singleflight"
 
 import (
 	"bytes"
@@ -18,6 +18,68 @@ import (
 	"testing"
 	"time"
 )
+
+type errValue struct{}
+
+func (err *errValue) Error() string {
+	return "error value"
+}
+
+func TestPanicErrorUnwrap(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name             string
+		panicValue       any
+		wrappedErrorType bool
+	}{
+		{
+			name:             "panicError wraps non-error type",
+			panicValue:       &panicError{value: "string value"},
+			wrappedErrorType: false,
+		},
+		{
+			name:             "panicError wraps error type",
+			panicValue:       &panicError{value: new(errValue)},
+			wrappedErrorType: false,
+		},
+	}
+	for _, tc := range testCases {
+		tc := tc
+
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var recovered any
+
+			group := &Group[any]{}
+
+			func() {
+				defer func() {
+					recovered = recover()
+					t.Logf("after panic(%#v) in group.Do, recovered %#v", tc.panicValue, recovered)
+				}()
+
+				_, _, _ = group.Do(tc.name, func() (any, error) {
+					panic(tc.panicValue)
+				})
+			}()
+
+			if recovered == nil {
+				t.Fatal("expected a non-nil panic value")
+			}
+
+			err, ok := recovered.(error)
+			if !ok {
+				t.Fatalf("recovered non-error type: %T", recovered)
+			}
+
+			if !errors.Is(err, new(errValue)) && tc.wrappedErrorType {
+				t.Errorf("unexpected wrapped error type %T; want %T", err, new(errValue))
+			}
+		})
+	}
+}
 
 func TestDo(t *testing.T) {
 	var g Group[string]
@@ -50,9 +112,9 @@ func TestDoDupSuppress(t *testing.T) {
 	var g Group[string]
 	var wg1, wg2 sync.WaitGroup
 	c := make(chan string, 1)
-	var calls int32
+	var calls atomic.Int32
 	fn := func() (string, error) {
-		if atomic.AddInt32(&calls, 1) == 1 {
+		if calls.Add(1) == 1 {
 			// First invocation.
 			wg1.Done()
 		}
@@ -87,7 +149,7 @@ func TestDoDupSuppress(t *testing.T) {
 	// least reached the line before the Do.
 	c <- "bar"
 	wg2.Wait()
-	if got := atomic.LoadInt32(&calls); got <= 0 || got >= n {
+	if got := calls.Load(); got <= 0 || got >= n {
 		t.Errorf("number of calls = %d; want over 0 and less than %d", got, n)
 	}
 }
@@ -95,7 +157,7 @@ func TestDoDupSuppress(t *testing.T) {
 // Test that singleflight behaves correctly after Forget called.
 // See https://github.com/golang/go/issues/31420
 func TestForget(t *testing.T) {
-	var g Group[any]
+	var g Group[int]
 
 	var (
 		firstStarted  = make(chan struct{})
@@ -104,7 +166,7 @@ func TestForget(t *testing.T) {
 	)
 
 	go func() {
-		g.Do("key", func() (i any, e error) {
+		g.Do("key", func() (i int, e error) {
 			close(firstStarted)
 			<-unblockFirst
 			close(firstFinished)
@@ -115,7 +177,7 @@ func TestForget(t *testing.T) {
 	g.Forget("key")
 
 	unblockSecond := make(chan struct{})
-	secondResult := g.DoChan("key", func() (i any, e error) {
+	secondResult := g.DoChan("key", func() (i int, e error) {
 		<-unblockSecond
 		return 2, nil
 	})
@@ -123,7 +185,7 @@ func TestForget(t *testing.T) {
 	close(unblockFirst)
 	<-firstFinished
 
-	thirdResult := g.DoChan("key", func() (i any, e error) {
+	thirdResult := g.DoChan("key", func() (i int, e error) {
 		return 3, nil
 	})
 
@@ -161,18 +223,19 @@ func TestPanicDo(t *testing.T) {
 	}
 
 	const n = 5
-	waited := int32(n)
-	panicCount := int32(0)
+	waited := atomic.Int32{}
+	waited.Store(int32(n))
+	panicCount := atomic.Int32{}
 	done := make(chan struct{})
 	for i := 0; i < n; i++ {
 		go func() {
 			defer func() {
 				if err := recover(); err != nil {
 					t.Logf("Got panic: %v\n%s", err, debug.Stack())
-					atomic.AddInt32(&panicCount, 1)
+					panicCount.Add(1)
 				}
 
-				if atomic.AddInt32(&waited, -1) == 0 {
+				if waited.Add(-1) == 0 {
 					close(done)
 				}
 			}()
@@ -183,8 +246,9 @@ func TestPanicDo(t *testing.T) {
 
 	select {
 	case <-done:
-		if panicCount != n {
-			t.Errorf("Expect %d panic, but got %d", n, panicCount)
+		count := panicCount.Load()
+		if count != int32(n) {
+			t.Errorf("Expect %d panic, but got %d", n, count)
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("Do hangs")
@@ -199,7 +263,8 @@ func TestGoexitDo(t *testing.T) {
 	}
 
 	const n = 5
-	waited := int32(n)
+	waited := atomic.Int32{}
+	waited.Store(int32(n))
 	done := make(chan struct{})
 	for i := 0; i < n; i++ {
 		go func() {
@@ -208,7 +273,7 @@ func TestGoexitDo(t *testing.T) {
 				if err != nil {
 					t.Errorf("Error should be nil, but got: %v", err)
 				}
-				if atomic.AddInt32(&waited, -1) == 0 {
+				if waited.Add(-1) == 0 {
 					close(done)
 				}
 			}()
@@ -223,11 +288,24 @@ func TestGoexitDo(t *testing.T) {
 	}
 }
 
-func TestPanicDoChan(t *testing.T) {
-	if runtime.GOOS == "js" {
-		t.Skipf("js does not support exec")
+func executable(t testing.TB) string {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("skipping: test executable not found")
 	}
 
+	// Control case: check whether exec.Command works at all.
+	// (For example, it might fail with a permission error on iOS.)
+	cmd := exec.Command(exe, "-test.list=^$")
+	cmd.Env = []string{}
+	if err := cmd.Run(); err != nil {
+		t.Skipf("skipping: exec appears not to work on %s: %v", runtime.GOOS, err)
+	}
+
+	return exe
+}
+
+func TestPanicDoChan(t *testing.T) {
 	if os.Getenv("TEST_PANIC_DOCHAN") != "" {
 		defer func() {
 			recover()
@@ -243,7 +321,7 @@ func TestPanicDoChan(t *testing.T) {
 
 	t.Parallel()
 
-	cmd := exec.Command(os.Args[0], "-test.run="+t.Name(), "-test.v")
+	cmd := exec.Command(executable(t), "-test.run="+t.Name(), "-test.v")
 	cmd.Env = append(os.Environ(), "TEST_PANIC_DOCHAN=1")
 	out := new(bytes.Buffer)
 	cmd.Stdout = out
@@ -266,10 +344,6 @@ func TestPanicDoChan(t *testing.T) {
 }
 
 func TestPanicDoSharedByDoChan(t *testing.T) {
-	if runtime.GOOS == "js" {
-		t.Skipf("js does not support exec")
-	}
-
 	if os.Getenv("TEST_PANIC_DOCHAN") != "" {
 		blocked := make(chan struct{})
 		unblock := make(chan struct{})
@@ -297,7 +371,7 @@ func TestPanicDoSharedByDoChan(t *testing.T) {
 
 	t.Parallel()
 
-	cmd := exec.Command(os.Args[0], "-test.run="+t.Name(), "-test.v")
+	cmd := exec.Command(executable(t), "-test.run="+t.Name(), "-test.v")
 	cmd.Env = append(os.Environ(), "TEST_PANIC_DOCHAN=1")
 	out := new(bytes.Buffer)
 	cmd.Stdout = out
@@ -317,4 +391,34 @@ func TestPanicDoSharedByDoChan(t *testing.T) {
 	if !bytes.Contains(out.Bytes(), []byte("Panicking in Do")) {
 		t.Errorf("Test subprocess failed, but the crash isn't caused by panicking in Do")
 	}
+}
+
+func ExampleGroup() {
+	g := new(Group[string])
+
+	block := make(chan struct{})
+	res1c := g.DoChan("key", func() (string, error) {
+		<-block
+		return "func 1", nil
+	})
+	res2c := g.DoChan("key", func() (string, error) {
+		<-block
+		return "func 2", nil
+	})
+	close(block)
+
+	res1 := <-res1c
+	res2 := <-res2c
+
+	// Results are shared by functions executed with duplicate keys.
+	fmt.Println("Shared:", res2.Shared)
+	// Only the first function is executed: it is registered and started with "key",
+	// and doesn't complete before the second function is registered with a duplicate key.
+	fmt.Println("Equal results:", res1.Val == res2.Val)
+	fmt.Println("Result:", res1.Val)
+
+	// Output:
+	// Shared: true
+	// Equal results: true
+	// Result: func 1
 }

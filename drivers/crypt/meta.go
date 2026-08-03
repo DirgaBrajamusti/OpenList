@@ -6,11 +6,6 @@ import (
 )
 
 type Addition struct {
-	// Usually one of two
-	//driver.RootPath
-	//driver.RootID
-	// define other
-
 	FileNameEnc string `json:"filename_encryption" type:"select" required:"true" options:"off,standard,obfuscate" default:"off"`
 	DirNameEnc  string `json:"directory_name_encryption" type:"select" required:"true" options:"false,true" default:"false"`
 	RemotePath  string `json:"remote_path" required:"true" help:"This is where the encrypted data stores"`
@@ -26,17 +21,13 @@ type Addition struct {
 }
 
 var config = driver.Config{
-	Name:              "Crypt",
-	LocalSort:         true,
-	OnlyLocal:         true,
-	OnlyProxy:         true,
-	NoCache:           true,
-	NoUpload:          false,
-	NeedMs:            false,
-	DefaultRoot:       "/",
-	CheckStatus:       false,
-	Alert:             "",
-	NoOverwriteUpload: false,
+	Name:        "Crypt",
+	LocalSort:   true,
+	OnlyProxy:   true,
+	NoCache:     true,
+	DefaultRoot: "/",
+	NoLinkURL:   true,
+	CheckStatus: true,
 }
 
 func init() {

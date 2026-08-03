@@ -68,15 +68,7 @@ func (e *RespErr) Error() string {
 	return ""
 }
 
-// 登陆需要的参数
-type LoginParam struct {
-	// 加密后的用户名和密码
-	RsaUsername string
-	RsaPassword string
-
-	// rsa密钥
-	jRsaKey string
-
+type BaseLoginParam struct {
 	// 请求头参数
 	Lt    string
 	ReqId string
@@ -86,6 +78,27 @@ type LoginParam struct {
 
 	// 验证码
 	CaptchaToken string
+}
+
+// QRLoginParam 用于暂存二维码登录过程中的参数
+type QRLoginParam struct {
+	BaseLoginParam
+
+	UUID       string `json:"uuid"`
+	EncodeUUID string `json:"encodeuuid"`
+	EncryUUID  string `json:"encryuuid"`
+}
+
+// 登陆需要的参数
+type LoginParam struct {
+	// 加密后的用户名和密码
+	RsaUsername string
+	RsaPassword string
+
+	// rsa密钥
+	jRsaKey string
+
+	BaseLoginParam
 }
 
 // 登陆加密相关
@@ -153,10 +166,11 @@ type FamilyInfoResp struct {
 /*文件部分*/
 // 文件
 type Cloud189File struct {
-	ID   String `json:"id"`
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-	Md5  string `json:"md5"`
+	ID       String `json:"id"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	Md5      string `json:"md5"`
+	ParentID string `json:"-"` // 由 getFiles 设置，不从 JSON 解析
 
 	LastOpTime Time `json:"lastOpTime"`
 	CreateDate Time `json:"createDate"`
@@ -395,4 +409,60 @@ func (p Params) Encode() string {
 		buf.WriteString(p[keys[i]])
 	}
 	return buf.String()
+}
+
+type CapacityResp struct {
+	ResCode           int    `json:"res_code"`
+	ResMessage        string `json:"res_message"`
+	Account           string `json:"account"`
+	CloudCapacityInfo struct {
+		FreeSize     int64 `json:"freeSize"`
+		MailUsedSize int64 `json:"mail189UsedSize"`
+		TotalSize    int64 `json:"totalSize"`
+		UsedSize     int64 `json:"usedSize"`
+	} `json:"cloudCapacityInfo"`
+	FamilyCapacityInfo struct {
+		FreeSize  int64 `json:"freeSize"`
+		TotalSize int64 `json:"totalSize"`
+		UsedSize  int64 `json:"usedSize"`
+	} `json:"familyCapacityInfo"`
+	TotalSize uint64 `json:"totalSize"`
+}
+
+type RenameResp struct {
+	ResMsg      string `json:"res_message"`
+	CreateDate  Time   `json:"createDate"`
+	FileCate    int    `json:"fileCata"`
+	ID          String `json:"id"`
+	LastOpTime  Time   `json:"lastOpTime"`
+	MD5         string `json:"md5"`
+	MediaType   int    `json:"mediaType"`
+	Name        string `json:"name"`
+	Oeientation int    `json:"orientation"`
+	ParentID    int64  `json:"parentId"`
+	Rev         string `json:"rev"`
+	Size        int64  `json:"size"`
+	ResCode     any    `json:"res_code"` // int or string
+}
+
+func (r *RenameResp) toFile(f *Cloud189File) *Cloud189File {
+	return &Cloud189File{
+		ID:         r.ID,
+		Name:       r.Name,
+		Size:       r.Size,
+		Md5:        r.MD5,
+		LastOpTime: r.LastOpTime,
+		CreateDate: r.CreateDate,
+		Icon:       f.Icon,
+	}
+}
+
+func (r *RenameResp) toFolder() *Cloud189Folder {
+	return &Cloud189Folder{
+		ID:         r.ID,
+		Name:       r.Name,
+		ParentID:   r.ParentID,
+		LastOpTime: r.LastOpTime,
+		CreateDate: r.CreateDate,
+	}
 }

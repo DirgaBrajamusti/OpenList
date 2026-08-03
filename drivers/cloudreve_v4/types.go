@@ -47,7 +47,13 @@ type BasicConfigResp struct {
 
 type SiteLoginConfigResp struct {
 	LoginCaptcha bool `json:"login_captcha"`
-	Authn        bool `json:"authn"`
+	// RegCaptcha bool `json:"reg_captcha"`
+	// ForgetCaptcha bool `json:"forget_captcha"`
+	// RegisterEnabled bool `json:"register_enabled"`
+	// TosURL string `json:"tos_url"`
+	// PrivacyPolicyURL string `json:"privacy_policy_url"`
+	// SsoDisplayName string `json:"sso_display_name"`
+	// OidcDisplayName string `json:"oidc_display_name"`
 }
 
 type PrepareLoginResp struct {
@@ -60,11 +66,27 @@ type CaptchaResp struct {
 	Ticket string `json:"ticket"`
 }
 
+type AccessJWT struct {
+	TokenType string `json:"token_type"`
+	Sub       string `json:"sub"`
+	Exp       int64  `json:"exp"`
+	Nbf       int64  `json:"nbf"`
+}
+
+type RefreshJWT struct {
+	TokenType   string `json:"token_type"`
+	Sub         string `json:"sub"`
+	Exp         int    `json:"exp"`
+	Nbf         int    `json:"nbf"`
+	StateHash   string `json:"state_hash"`
+	RootTokenID string `json:"root_token_id"`
+}
+
 type Token struct {
-	AccessToken    string    `json:"access_token"`
-	RefreshToken   string    `json:"refresh_token"`
-	AccessExpires  time.Time `json:"access_expires"`
-	RefreshExpires time.Time `json:"refresh_expires"`
+	AccessToken    string `json:"access_token"`
+	RefreshToken   string `json:"refresh_token"`
+	AccessExpires  string `json:"access_expires"`
+	RefreshExpires string `json:"refresh_expires"`
 }
 
 type TokenResponse struct {
@@ -98,6 +120,18 @@ type File struct {
 	Capability    string         `json:"capability"`
 	Owned         bool           `json:"owned"`
 	PrimaryEntity string         `json:"primary_entity"`
+}
+
+func fileToObject(f *File) *model.Object {
+	return &model.Object{
+		ID:       f.ID,
+		Path:     f.Path,
+		Name:     f.Name,
+		Size:     f.Size,
+		Modified: f.UpdatedAt,
+		Ctime:    f.CreatedAt,
+		IsFolder: f.Type == 1,
+	}
 }
 
 type StoragePolicy struct {
@@ -181,4 +215,10 @@ type FolderSummaryResp struct {
 		Completed    bool      `json:"completed"`
 		CalculatedAt time.Time `json:"calculated_at"`
 	} `json:"folder_summary"`
+}
+
+type CapacityResp struct {
+	Total int64 `json:"total"`
+	Used  int64 `json:"used"`
+	// StoragePackTotal uint64 `json:"storage_pack_total"`
 }

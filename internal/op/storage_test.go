@@ -10,7 +10,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	mapset "github.com/deckarep/golang-set/v2"
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -19,7 +19,7 @@ func init() {
 	if err != nil {
 		panic("failed to connect database")
 	}
-	conf.Conf = conf.DefaultConfig()
+	conf.Conf = conf.DefaultConfig("data")
 	db.Init(dB)
 }
 

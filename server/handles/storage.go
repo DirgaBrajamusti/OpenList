@@ -2,16 +2,74 @@ package handles
 
 import (
 	"context"
+	"errors"
 	"strconv"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/db"
+	"github.com/OpenListTeam/OpenList/v4/internal/driver"
+	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+type StorageResp struct {
+	model.Storage
+	MountDetails *model.StorageDetails `json:"mount_details,omitempty"`
+}
+
+type detailWithIndex struct {
+	idx int
+	val *model.StorageDetails
+}
+
+func makeStorageResp(ctx *gin.Context, storages []model.Storage) []*StorageResp {
+	ret := make([]*StorageResp, len(storages))
+	detailsChan := make(chan detailWithIndex, len(storages))
+	workerCount := 0
+	for i, s := range storages {
+		ret[i] = &StorageResp{
+			Storage:      s,
+			MountDetails: nil,
+		}
+		if setting.GetBool(conf.HideStorageDetailsInManagePage) {
+			continue
+		}
+		d, err := op.GetStorageByMountPath(s.MountPath)
+		if err != nil {
+			continue
+		}
+		_, ok := d.(driver.WithDetails)
+		if !ok {
+			continue
+		}
+		workerCount++
+		go func(dri driver.Driver, idx int) {
+			details, e := op.GetStorageDetails(ctx, dri)
+			if e != nil {
+				if !errors.Is(e, errs.NotImplement) && !errors.Is(e, errs.StorageNotInit) {
+					log.Errorf("failed get %s details: %+v", dri.GetStorage().MountPath, e)
+				}
+			}
+			detailsChan <- detailWithIndex{idx: idx, val: details}
+		}(d, i)
+	}
+	for workerCount > 0 {
+		select {
+		case r := <-detailsChan:
+			ret[r.idx].MountDetails = r.val
+			workerCount--
+		case <-time.After(time.Second * 3):
+			workerCount = 0
+		}
+	}
+	return ret
+}
 
 func ListStorages(c *gin.Context) {
 	var req model.PageReq
@@ -27,7 +85,7 @@ func ListStorages(c *gin.Context) {
 		return
 	}
 	common.SuccessResp(c, common.PageResp{
-		Content: storages,
+		Content: makeStorageResp(c, storages),
 		Total:   total,
 	})
 }
@@ -38,7 +96,7 @@ func CreateStorage(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	if id, err := op.CreateStorage(c, req); err != nil {
+	if id, err := op.CreateStorage(c.Request.Context(), req); err != nil {
 		common.ErrorWithDataResp(c, err, 500, gin.H{
 			"id": id,
 		}, true)
@@ -55,7 +113,7 @@ func UpdateStorage(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	if err := op.UpdateStorage(c, req); err != nil {
+	if err := op.UpdateStorage(c.Request.Context(), req); err != nil {
 		common.ErrorResp(c, err, 500, true)
 	} else {
 		common.SuccessResp(c)
@@ -69,7 +127,7 @@ func DeleteStorage(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	if err := op.DeleteStorageById(c, uint(id)); err != nil {
+	if err := op.DeleteStorageById(c.Request.Context(), uint(id)); err != nil {
 		common.ErrorResp(c, err, 500, true)
 		return
 	}
@@ -83,7 +141,7 @@ func DisableStorage(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	if err := op.DisableStorage(c, uint(id)); err != nil {
+	if err := op.DisableStorage(c.Request.Context(), uint(id)); err != nil {
 		common.ErrorResp(c, err, 500, true)
 		return
 	}
@@ -97,7 +155,7 @@ func EnableStorage(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	if err := op.EnableStorage(c, uint(id)); err != nil {
+	if err := op.EnableStorage(c.Request.Context(), uint(id)); err != nil {
 		common.ErrorResp(c, err, 500, true)
 		return
 	}
@@ -126,7 +184,7 @@ func LoadAllStorages(c *gin.Context) {
 		common.ErrorResp(c, err, 500, true)
 		return
 	}
-	conf.StoragesLoaded = false
+	conf.ResetStoragesLoadSignal()
 	go func(storages []model.Storage) {
 		for _, storage := range storages {
 			storageDriver, err := op.GetStorageByMountPath(storage.MountPath)
@@ -146,7 +204,7 @@ func LoadAllStorages(c *gin.Context) {
 			log.Infof("success load storage: [%s], driver: [%s]",
 				storage.MountPath, storage.Driver)
 		}
-		conf.StoragesLoaded = true
+		conf.SendStoragesLoadedSignal()
 	}(storages)
 	common.SuccessResp(c)
 }

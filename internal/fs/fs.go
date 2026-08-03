@@ -19,8 +19,9 @@ import (
 // then pass the actual path to the op package
 
 type ListArgs struct {
-	Refresh bool
-	NoLog   bool
+	Refresh            bool
+	NoLog              bool
+	WithStorageDetails bool
 }
 
 func List(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error) {
@@ -35,11 +36,12 @@ func List(ctx context.Context, path string, args *ListArgs) ([]model.Obj, error)
 }
 
 type GetArgs struct {
-	NoLog bool
+	NoLog              bool
+	WithStorageDetails bool
 }
 
 func Get(ctx context.Context, path string, args *GetArgs) (model.Obj, error) {
-	res, err := get(ctx, path)
+	res, err := get(ctx, path, args)
 	if err != nil {
 		if !args.NoLog {
 			log.Warnf("failed get %s: %s", path, err)
@@ -58,48 +60,40 @@ func Link(ctx context.Context, path string, args model.LinkArgs) (*model.Link, m
 	return res, file, nil
 }
 
-func MakeDir(ctx context.Context, path string, lazyCache ...bool) error {
-	err := makeDir(ctx, path, lazyCache...)
+func MakeDir(ctx context.Context, path string) error {
+	err := makeDir(ctx, path)
 	if err != nil {
 		log.Errorf("failed make dir %s: %+v", path, err)
 	}
 	return err
 }
 
-func Move(ctx context.Context, srcPath, dstDirPath string, lazyCache ...bool) error {
-	err := move(ctx, srcPath, dstDirPath, lazyCache...)
+func Move(ctx context.Context, srcPath, dstDirPath string, skipHook ...bool) (task.TaskExtensionInfo, error) {
+	req, err := transfer(ctx, move, srcPath, dstDirPath, skipHook...)
 	if err != nil {
 		log.Errorf("failed move %s to %s: %+v", srcPath, dstDirPath, err)
 	}
-	return err
+	return req, err
 }
 
-func MoveWithTask(ctx context.Context, srcPath, dstDirPath string, lazyCache ...bool) (task.TaskExtensionInfo, error) {
-	res, err := _move(ctx, srcPath, dstDirPath, lazyCache...)
-	if err != nil {
-		log.Errorf("failed move %s to %s: %+v", srcPath, dstDirPath, err)
-	}
-	return res, err
-}
-
-func MoveWithTaskAndValidation(ctx context.Context, srcPath, dstDirPath string, validateExistence bool, lazyCache ...bool) (task.TaskExtensionInfo, error) {
-	res, err := _moveWithValidation(ctx, srcPath, dstDirPath, validateExistence, lazyCache...)
-	if err != nil {
-		log.Errorf("failed move %s to %s: %+v", srcPath, dstDirPath, err)
-	}
-	return res, err
-}
-
-func Copy(ctx context.Context, srcObjPath, dstDirPath string, lazyCache ...bool) (task.TaskExtensionInfo, error) {
-	res, err := _copy(ctx, srcObjPath, dstDirPath, lazyCache...)
+func Copy(ctx context.Context, srcObjPath, dstDirPath string, skipHook ...bool) (task.TaskExtensionInfo, error) {
+	res, err := transfer(ctx, copy, srcObjPath, dstDirPath, skipHook...)
 	if err != nil {
 		log.Errorf("failed copy %s to %s: %+v", srcObjPath, dstDirPath, err)
 	}
 	return res, err
 }
 
-func Rename(ctx context.Context, srcPath, dstName string, lazyCache ...bool) error {
-	err := rename(ctx, srcPath, dstName, lazyCache...)
+func Merge(ctx context.Context, srcObjPath, dstDirPath string, skipHook ...bool) (task.TaskExtensionInfo, error) {
+	res, err := transfer(ctx, merge, srcObjPath, dstDirPath, skipHook...)
+	if err != nil {
+		log.Errorf("failed merge %s to %s: %+v", srcObjPath, dstDirPath, err)
+	}
+	return res, err
+}
+
+func Rename(ctx context.Context, srcPath, dstName string, skipHook ...bool) error {
+	err := rename(ctx, srcPath, dstName, skipHook...)
 	if err != nil {
 		log.Errorf("failed rename %s to %s: %+v", srcPath, dstName, err)
 	}
@@ -114,8 +108,8 @@ func Remove(ctx context.Context, path string) error {
 	return err
 }
 
-func PutDirectly(ctx context.Context, dstDirPath string, file model.FileStreamer, lazyCache ...bool) error {
-	err := putDirectly(ctx, dstDirPath, file, lazyCache...)
+func PutDirectly(ctx context.Context, dstDirPath string, file model.FileStreamer, skipHook ...bool) error {
+	err := putDirectly(ctx, dstDirPath, file, skipHook...)
 	if err != nil {
 		log.Errorf("failed put %s: %+v", dstDirPath, err)
 	}
@@ -184,7 +178,7 @@ func GetStorage(path string, args *GetStoragesArgs) (driver.Driver, error) {
 func Other(ctx context.Context, args model.FsOtherArgs) (interface{}, error) {
 	res, err := other(ctx, args)
 	if err != nil {
-		log.Errorf("failed remove %s: %+v", args.Path, err)
+		log.Errorf("failed get other %s: %+v", args.Path, err)
 	}
 	return res, err
 }
@@ -203,4 +197,12 @@ func PutURL(ctx context.Context, path, dstName, urlStr string) error {
 		return errs.NotImplement
 	}
 	return op.PutURL(ctx, storage, dstDirActualPath, dstName, urlStr)
+}
+
+func GetDirectUploadInfo(ctx context.Context, tool, path, dstName string, fileSize int64, overwrite bool) (any, error) {
+	info, err := getDirectUploadInfo(ctx, tool, path, dstName, fileSize, overwrite)
+	if err != nil {
+		log.Errorf("failed get %s direct upload info for %s(%d bytes): %+v", path, dstName, fileSize, err)
+	}
+	return info, err
 }

@@ -8,13 +8,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
-	"github.com/google/uuid"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
+	"github.com/google/uuid"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -244,11 +245,8 @@ func (d *QuarkOpen) generateProofCode(file model.FileStreamer, proofSeed string,
 	// 读取数据
 	buf := make([]byte, length)
 	n, err := io.ReadFull(reader, buf)
-	if errors.Is(err, io.ErrUnexpectedEOF) {
-		return "", fmt.Errorf("can't read data, expected=%d, got=%d", length, n)
-	}
-	if err != nil {
-		return "", fmt.Errorf("failed to read data: %w", err)
+	if n != int(length) {
+		return "", fmt.Errorf("failed to read all data: (expect =%d, actual =%d) %w", length, n, err)
 	}
 
 	// Base64编码
@@ -343,8 +341,7 @@ func (d *QuarkOpen) upPart(ctx context.Context, upUrlInfo UpUrlInfo, partNumber 
 	req.Header.Set("User-Agent", "Go-http-client/1.1")
 
 	// 发送请求
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := base.HttpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -443,7 +440,6 @@ func (d *QuarkOpen) _refreshToken() (string, string, error) {
 		u := d.APIAddress
 		var resp RefreshTokenOnlineAPIResp
 		_, err := base.RestyClient.R().
-			SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Apple macOS 15_5) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/138.0.0.0 Openlist/425.6.30").
 			SetResult(&resp).
 			SetQueryParams(map[string]string{
 				"refresh_ui": d.RefreshToken,
@@ -458,7 +454,7 @@ func (d *QuarkOpen) _refreshToken() (string, string, error) {
 			if resp.ErrorMessage != "" {
 				return "", "", fmt.Errorf("failed to refresh token: %s", resp.ErrorMessage)
 			}
-			return "", "", fmt.Errorf("empty token returned from official API")
+			return "", "", fmt.Errorf("empty token returned from official API, a wrong refresh token may have been used")
 		}
 		return resp.RefreshToken, resp.AccessToken, nil
 	}

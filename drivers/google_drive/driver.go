@@ -162,9 +162,38 @@ func (d *GoogleDrive) Put(ctx context.Context, dstDir model.Obj, stream model.Fi
 				SetBody(driver.NewLimitedUploadStream(ctx, stream))
 		}, nil)
 	} else {
-		err = d.chunkUpload(ctx, stream, putUrl)
+		err = d.chunkUpload(ctx, stream, putUrl, up)
 	}
 	return err
+}
+
+func (d *GoogleDrive) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	if d.DisableDiskUsage {
+		return nil, errs.NotImplement
+	}
+	about, err := d.getAbout(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var total, used int64
+	if about.StorageQuota.Limit == nil {
+		total = 0
+	} else {
+		total, err = strconv.ParseInt(*about.StorageQuota.Limit, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+	}
+	used, err = strconv.ParseInt(about.StorageQuota.Usage, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: total,
+			UsedSpace:  used,
+		},
+	}, nil
 }
 
 var _ driver.Driver = (*GoogleDrive)(nil)

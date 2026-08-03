@@ -13,18 +13,20 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/setting"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/OpenListTeam/OpenList/v4/server/ftp"
 	ftpserver "github.com/fclairamb/ftpserverlib"
 )
 
 type FtpMainDriver struct {
 	settings     *ftpserver.Settings
-	proxyHeader  *http.Header
+	proxyHeader  http.Header
 	clients      map[uint32]ftpserver.ClientContext
 	shutdownLock sync.RWMutex
 	isShutdown   bool
@@ -32,8 +34,7 @@ type FtpMainDriver struct {
 }
 
 func NewMainDriver() (*FtpMainDriver, error) {
-	header := &http.Header{}
-	header.Add("User-Agent", setting.GetStr(conf.FTPProxyUserAgent))
+	ftp.InitStage()
 	transferType := ftpserver.TransferTypeASCII
 	if conf.Conf.FTP.DefaultTransferBinary {
 		transferType = ftpserver.TransferTypeBinary
@@ -80,7 +81,9 @@ func NewMainDriver() (*FtpMainDriver, error) {
 			ActiveConnectionsCheck:   activeConnCheck,
 			PasvConnectionsCheck:     pasvConnCheck,
 		},
-		proxyHeader:  header,
+		proxyHeader: http.Header{
+			"User-Agent": {base.UserAgent},
+		},
 		clients:      make(map[uint32]ftpserver.ClientContext),
 		shutdownLock: sync.RWMutex{},
 		isShutdown:   false,
@@ -110,6 +113,12 @@ func (d *FtpMainDriver) ClientDisconnected(cc ftpserver.ClientContext) {
 }
 
 func (d *FtpMainDriver) AuthUser(cc ftpserver.ClientContext, user, pass string) (ftpserver.ClientDriver, error) {
+	ip := cc.RemoteAddr().String()
+	count, ok := model.LoginCache.Get(ip)
+	if ok && count >= model.DefaultMaxAuthRetries {
+		model.LoginCache.Expire(ip, model.DefaultLockDuration)
+		return nil, errors.New("Too many unsuccessful sign-in attempts have been made using an incorrect username or password, Try again later.")
+	}
 	var userObj *model.User
 	var err error
 	if user == "anonymous" || user == "guest" {
@@ -119,27 +128,34 @@ func (d *FtpMainDriver) AuthUser(cc ftpserver.ClientContext, user, pass string) 
 		}
 	} else {
 		userObj, err = op.GetUserByName(user)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			err = userObj.ValidateRawPassword(pass)
+			if err != nil && setting.GetBool(conf.LdapLoginEnabled) && userObj.AllowLdap {
+				err = common.HandleLdapLogin(user, pass)
+			}
+		} else if setting.GetBool(conf.LdapLoginEnabled) && model.CanFTPAccess(int32(setting.GetInt(conf.LdapDefaultPermission, 0))) {
+			userObj, err = tryLdapLoginAndRegister(user, pass)
 		}
-		passHash := model.StaticHash(pass)
-		if err = userObj.ValidatePwdStaticHash(passHash); err != nil {
+		if err != nil {
+			model.LoginCache.Set(ip, count+1)
 			return nil, err
 		}
 	}
 	if userObj.Disabled || !userObj.CanFTPAccess() {
+		model.LoginCache.Set(ip, count+1)
 		return nil, errors.New("user is not allowed to access via FTP")
 	}
+	model.LoginCache.Del(ip)
 
 	ctx := context.Background()
-	ctx = context.WithValue(ctx, "user", userObj)
+	ctx = context.WithValue(ctx, conf.UserKey, userObj)
 	if user == "anonymous" || user == "guest" {
-		ctx = context.WithValue(ctx, "meta_pass", pass)
+		ctx = context.WithValue(ctx, conf.MetaPassKey, pass)
 	} else {
-		ctx = context.WithValue(ctx, "meta_pass", "")
+		ctx = context.WithValue(ctx, conf.MetaPassKey, "")
 	}
-	ctx = context.WithValue(ctx, "client_ip", cc.RemoteAddr().String())
-	ctx = context.WithValue(ctx, "proxy_header", d.proxyHeader)
+	ctx = context.WithValue(ctx, conf.ClientIPKey, ip)
+	ctx = context.WithValue(ctx, conf.ProxyHeaderKey, d.proxyHeader)
 	return ftp.NewAferoAdapter(ctx), nil
 }
 
@@ -165,7 +181,7 @@ func lookupIP(host string) string {
 	}
 	ips, err := net.LookupIP(host)
 	if err != nil || len(ips) == 0 {
-		utils.Log.Fatalf("given FTP public host is invalid, and the default value will be used: %v", err)
+		utils.Log.Errorf("given FTP public host is invalid, and the default value will be used: %v", err)
 		return ""
 	}
 	for _, ip := range ips {
@@ -210,7 +226,7 @@ func newPortMapper(str string) ftpserver.PasvPortGetter {
 	if str == "" {
 		return nil
 	}
-	pasvPortMappers := strings.Split(strings.Replace(str, "\n", ",", -1), ",")
+	pasvPortMappers := strings.Split(strings.ReplaceAll(str, "\n", ","), ",")
 	groups := make([]group, len(pasvPortMappers))
 	totalLength := 0
 	convertToPorts := func(str string) (int, int, error) {
@@ -270,7 +286,7 @@ func newPortMapper(str string) ftpserver.PasvPortGetter {
 			break
 		}
 		if err != nil {
-			utils.Log.Fatalf("failed to convert FTP PASV port mapper %s: %v, the port mapper will be ignored.", mapper, err)
+			utils.Log.Errorf("failed to convert FTP PASV port mapper %s: %v, the port mapper will be ignored.", mapper, err)
 			return nil
 		}
 	}

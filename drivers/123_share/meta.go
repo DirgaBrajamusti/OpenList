@@ -15,17 +15,11 @@ type Addition struct {
 }
 
 var config = driver.Config{
-	Name:              "123PanShare",
-	LocalSort:         true,
-	OnlyLocal:         false,
-	OnlyProxy:         false,
-	NoCache:           false,
-	NoUpload:          true,
-	NeedMs:            false,
-	DefaultRoot:       "0",
-	CheckStatus:       false,
-	Alert:             "",
-	NoOverwriteUpload: false,
+	Name:        "123PanShare",
+	LocalSort:   true,
+	NoUpload:    true,
+	DefaultRoot: "0",
+	PreferProxy: true,
 }
 
 func init() {

@@ -15,11 +15,9 @@ type Addition struct {
 }
 
 var config = driver.Config{
-	Name:        "115 Cloud",
-	DefaultRoot: "0",
-	// OnlyProxy:   true,
-	// OnlyLocal:         true,
-	// NoOverwriteUpload: true,
+	Name:          "115 Cloud",
+	DefaultRoot:   "0",
+	LinkCacheMode: driver.LinkCacheUA,
 }
 
 func init() {

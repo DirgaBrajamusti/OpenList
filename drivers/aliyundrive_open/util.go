@@ -19,7 +19,7 @@ import (
 
 // do others that not defined in Driver interface
 
-func (d *AliyundriveOpen) _refreshToken() (string, string, error) {
+func (d *AliyundriveOpen) _refreshToken(ctx context.Context) (string, string, error) {
 	if d.UseOnlineAPI && d.APIAddress != "" {
 		u := d.APIAddress
 		var resp struct {
@@ -27,13 +27,22 @@ func (d *AliyundriveOpen) _refreshToken() (string, string, error) {
 			AccessToken  string `json:"access_token"`
 			ErrorMessage string `json:"text"`
 		}
-		_, err := base.RestyClient.R().
-			SetHeader("User-Agent", "Mozilla/5.0 (Macintosh; Apple macOS 15_5) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/138.0.0.0 Openlist/425.6.30").
+
+		// 根据AlipanType选项设置driver_txt
+		driverTxt := "alicloud_qr"
+		if d.AlipanType == "alipanTV" {
+			driverTxt = "alicloud_tv"
+		}
+		err := d.wait(ctx, limiterOther)
+		if err != nil {
+			return "", "", err
+		}
+		_, err = base.RestyClient.R().
 			SetResult(&resp).
 			SetQueryParams(map[string]string{
 				"refresh_ui": d.RefreshToken,
 				"server_use": "true",
-				"driver_txt": "alicloud_qr",
+				"driver_txt": driverTxt,
 			}).
 			Get(u)
 		if err != nil {
@@ -43,14 +52,17 @@ func (d *AliyundriveOpen) _refreshToken() (string, string, error) {
 			if resp.ErrorMessage != "" {
 				return "", "", fmt.Errorf("failed to refresh token: %s", resp.ErrorMessage)
 			}
-			return "", "", fmt.Errorf("empty token returned from official API")
+			return "", "", fmt.Errorf("empty token returned from official API, a wrong refresh token may have been used")
 		}
 		return resp.RefreshToken, resp.AccessToken, nil
 	}
-
 	// 本地刷新逻辑，必须要求 client_id 和 client_secret
 	if d.ClientID == "" || d.ClientSecret == "" {
 		return "", "", fmt.Errorf("empty ClientID or ClientSecret")
+	}
+	err := d.wait(ctx, limiterOther)
+	if err != nil {
+		return "", "", err
 	}
 	url := API_URL + "/oauth/access_token"
 	//var resp base.TokenResp
@@ -103,18 +115,18 @@ func getSub(token string) (string, error) {
 	return utils.Json.Get(bs, "sub").ToString(), nil
 }
 
-func (d *AliyundriveOpen) refreshToken() error {
+func (d *AliyundriveOpen) refreshToken(ctx context.Context) error {
 	if d.ref != nil {
-		return d.ref.refreshToken()
+		return d.ref.refreshToken(ctx)
 	}
-	refresh, access, err := d._refreshToken()
+	refresh, access, err := d._refreshToken(ctx)
 	for i := 0; i < 3; i++ {
 		if err == nil {
 			break
 		} else {
 			log.Errorf("[ali_open] failed to refresh token: %s", err)
 		}
-		refresh, access, err = d._refreshToken()
+		refresh, access, err = d._refreshToken(ctx)
 	}
 	if err != nil {
 		return err
@@ -125,12 +137,12 @@ func (d *AliyundriveOpen) refreshToken() error {
 	return nil
 }
 
-func (d *AliyundriveOpen) request(uri, method string, callback base.ReqCallback, retry ...bool) ([]byte, error) {
-	b, err, _ := d.requestReturnErrResp(uri, method, callback, retry...)
+func (d *AliyundriveOpen) request(ctx context.Context, limitTy limiterType, uri, method string, callback base.ReqCallback, retry ...bool) ([]byte, error) {
+	b, err, _ := d.requestReturnErrResp(ctx, limitTy, uri, method, callback, retry...)
 	return b, err
 }
 
-func (d *AliyundriveOpen) requestReturnErrResp(uri, method string, callback base.ReqCallback, retry ...bool) ([]byte, error, *ErrResp) {
+func (d *AliyundriveOpen) requestReturnErrResp(ctx context.Context, limitTy limiterType, uri, method string, callback base.ReqCallback, retry ...bool) ([]byte, error, *ErrResp) {
 	req := base.RestyClient.R()
 	// TODO check whether access_token is expired
 	req.SetHeader("Authorization", "Bearer "+d.getAccessToken())
@@ -142,6 +154,10 @@ func (d *AliyundriveOpen) requestReturnErrResp(uri, method string, callback base
 	}
 	var e ErrResp
 	req.SetError(&e)
+	err := d.wait(ctx, limitTy)
+	if err != nil {
+		return nil, err, nil
+	}
 	res, err := req.Execute(method, API_URL+uri)
 	if err != nil {
 		if res != nil {
@@ -152,11 +168,11 @@ func (d *AliyundriveOpen) requestReturnErrResp(uri, method string, callback base
 	isRetry := len(retry) > 0 && retry[0]
 	if e.Code != "" {
 		if !isRetry && (utils.SliceContains([]string{"AccessTokenInvalid", "AccessTokenExpired", "I400JD"}, e.Code) || d.getAccessToken() == "") {
-			err = d.refreshToken()
+			err = d.refreshToken(ctx)
 			if err != nil {
 				return nil, err, nil
 			}
-			return d.requestReturnErrResp(uri, method, callback, true)
+			return d.requestReturnErrResp(ctx, limitTy, uri, method, callback, true)
 		}
 		return nil, fmt.Errorf("%s:%s", e.Code, e.Message), &e
 	}
@@ -165,7 +181,7 @@ func (d *AliyundriveOpen) requestReturnErrResp(uri, method string, callback base
 
 func (d *AliyundriveOpen) list(ctx context.Context, data base.Json) (*Files, error) {
 	var resp Files
-	_, err := d.request("/adrive/v1.0/openFile/list", http.MethodPost, func(req *resty.Request) {
+	_, err := d.request(ctx, limiterList, "/adrive/v1.0/openFile/list", http.MethodPost, func(req *resty.Request) {
 		req.SetBody(data).SetResult(&resp)
 	})
 	if err != nil {
@@ -194,7 +210,7 @@ func (d *AliyundriveOpen) getFiles(ctx context.Context, fileId string) ([]File, 
 			//"video_thumbnail_width": 480,
 			//"image_thumbnail_width": 480,
 		}
-		resp, err := d.limitList(ctx, data)
+		resp, err := d.list(ctx, data)
 		if err != nil {
 			return nil, err
 		}

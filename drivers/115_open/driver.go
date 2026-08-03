@@ -2,29 +2,34 @@ package _115_open
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	stdpath "path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	sdk "github.com/OpenListTeam/115-sdk-go"
 	"github.com/OpenListTeam/OpenList/v4/cmd/flags"
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
+	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	sdk "github.com/OpenListTeam/115-sdk-go"
 	"golang.org/x/time/rate"
 )
 
 type Open115 struct {
 	model.Storage
 	Addition
-	client  *sdk.Client
-	limiter *rate.Limiter
+	client     *sdk.Client
+	limiter    *rate.Limiter
+	parentPath string
 }
 
 func (d *Open115) Config() driver.Config {
@@ -53,6 +58,34 @@ func (d *Open115) Init(ctx context.Context) error {
 	if d.Addition.LimitRate > 0 {
 		d.limiter = rate.NewLimiter(rate.Limit(d.Addition.LimitRate), 1)
 	}
+	if d.PageSize <= 0 {
+		d.PageSize = 200
+	} else if d.PageSize > 1150 {
+		d.PageSize = 1150
+	}
+
+	// add parent path
+	d.parentPath = "/"
+	if d.GetRootId() != d.Config().DefaultRoot {
+		folderInfo, err := d.client.GetFolderInfo(ctx, d.GetRootId())
+		if err != nil {
+			return err
+		}
+
+		if folderInfo.FileID != d.Config().DefaultRoot {
+			d.parentPath = stdpath.Join(d.parentPath, folderInfo.FileName)
+		}
+
+		parentPaths := folderInfo.Paths
+		slices.Reverse(parentPaths)
+		for _, parentPathInfo := range parentPaths {
+			if parentPathInfo.FileID == d.Config().DefaultRoot {
+				d.parentPath = stdpath.Join("/", d.parentPath)
+			} else {
+				d.parentPath = stdpath.Join("/", parentPathInfo.FileName, d.parentPath)
+			}
+		}
+	}
 	return nil
 }
 
@@ -69,7 +102,7 @@ func (d *Open115) Drop(ctx context.Context) error {
 
 func (d *Open115) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
 	var res []model.Obj
-	pageSize := int64(200)
+	pageSize := int64(d.PageSize)
 	offset := int64(0)
 	for {
 		if err := d.WaitLimit(ctx); err != nil {
@@ -131,6 +164,69 @@ func (d *Open115) Link(ctx context.Context, file model.Obj, args model.LinkArgs)
 	}, nil
 }
 
+func (d *Open115) Get(ctx context.Context, path string) (model.Obj, error) {
+	if err := d.WaitLimit(ctx); err != nil {
+		return nil, err
+	}
+	path = stdpath.Join(d.parentPath, path)
+	resp, err := d.client.GetFolderInfoByPath(ctx, path)
+	if err != nil {
+		if errors.Is(err, sdk.ErrObjectNotFound) {
+			return d.getFromParent(ctx, path, "")
+		}
+		return nil, err
+	}
+	obj := &Obj{
+		Fid:  resp.FileID,
+		Fn:   resp.FileName,
+		Fc:   resp.FileCategory,
+		Sha1: resp.Sha1,
+		Pc:   resp.PickCode,
+		FS:   resp.SizeByte,
+		Upt:  parseTime(resp.UTime),
+		UpPt: parseTime(resp.PTime),
+	}
+	if !obj.IsDir() && obj.ModTime().Unix() <= 0 {
+		return d.getFromParent(ctx, path, obj.GetID())
+	}
+	return obj, nil
+}
+
+func (d *Open115) getFromParent(ctx context.Context, path, id string) (model.Obj, error) {
+	path = stdpath.Clean(path)
+	parent, name := stdpath.Split(path)
+	parent = stdpath.Clean(parent)
+	parentID := d.GetRootId()
+	if stdpath.Clean(parent) != stdpath.Clean(d.parentPath) {
+		if err := d.WaitLimit(ctx); err != nil {
+			return nil, err
+		}
+		parentInfo, err := d.client.GetFolderInfoByPath(ctx, parent)
+		if err != nil {
+			if !errors.Is(err, sdk.ErrObjectNotFound) {
+				return nil, err
+			}
+			parentObj, err := d.getFromParent(ctx, parent, "")
+			if err != nil {
+				return nil, err
+			}
+			parentID = parentObj.GetID()
+		} else {
+			parentID = parentInfo.FileID
+		}
+	}
+	files, err := d.List(ctx, &Obj{Fid: parentID, Fc: "0"}, model.ListArgs{})
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range files {
+		if (id != "" && file.GetID() == id) || (id == "" && file.GetName() == name) {
+			return file, nil
+		}
+	}
+	return nil, errs.ObjectNotFound
+}
+
 func (d *Open115) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error) {
 	if err := d.WaitLimit(ctx); err != nil {
 		return nil, err
@@ -150,18 +246,15 @@ func (d *Open115) MakeDir(ctx context.Context, parentDir model.Obj, dirName stri
 	}, nil
 }
 
-func (d *Open115) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
+func (d *Open115) Move(ctx context.Context, srcObj, dstDir model.Obj) error {
 	if err := d.WaitLimit(ctx); err != nil {
-		return nil, err
+		return err
 	}
 	_, err := d.client.Move(ctx, &sdk.MoveReq{
 		FileIDs: srcObj.GetID(),
 		ToCid:   dstDir.GetID(),
 	})
-	if err != nil {
-		return nil, err
-	}
-	return srcObj, nil
+	return err
 }
 
 func (d *Open115) Rename(ctx context.Context, srcObj model.Obj, newName string) (model.Obj, error) {
@@ -169,8 +262,8 @@ func (d *Open115) Rename(ctx context.Context, srcObj model.Obj, newName string) 
 		return nil, err
 	}
 	_, err := d.client.UpdateFile(ctx, &sdk.UpdateFileReq{
-		FileID:  srcObj.GetID(),
-		FileNma: newName,
+		FileID:   srcObj.GetID(),
+		FileName: newName,
 	})
 	if err != nil {
 		return nil, err
@@ -178,23 +271,21 @@ func (d *Open115) Rename(ctx context.Context, srcObj model.Obj, newName string) 
 	obj, ok := srcObj.(*Obj)
 	if ok {
 		obj.Fn = newName
+		return srcObj, nil
 	}
-	return srcObj, nil
+	return nil, nil
 }
 
-func (d *Open115) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
+func (d *Open115) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 	if err := d.WaitLimit(ctx); err != nil {
-		return nil, err
+		return err
 	}
 	_, err := d.client.Copy(ctx, &sdk.CopyReq{
 		PID:     dstDir.GetID(),
 		FileID:  srcObj.GetID(),
 		NoDupli: "1",
 	})
-	if err != nil {
-		return nil, err
-	}
-	return srcObj, nil
+	return err
 }
 
 func (d *Open115) Remove(ctx context.Context, obj model.Obj) error {
@@ -222,7 +313,7 @@ func (d *Open115) Put(ctx context.Context, dstDir model.Obj, file model.FileStre
 	}
 	sha1 := file.GetHash().GetHash(utils.SHA1)
 	if len(sha1) != utils.SHA1.Width {
-		_, sha1, err = stream.CacheFullInTempFileAndHash(file, utils.SHA1)
+		_, sha1, err = stream.CacheFullAndHash(file, &up, utils.SHA1)
 		if err != nil {
 			return err
 		}
@@ -252,6 +343,7 @@ func (d *Open115) Put(ctx context.Context, dstDir model.Obj, file model.FileStre
 		return err
 	}
 	if resp.Status == 2 {
+		up(100)
 		return nil
 	}
 	// 2. two way verify
@@ -286,6 +378,7 @@ func (d *Open115) Put(ctx context.Context, dstDir model.Obj, file model.FileStre
 			return err
 		}
 		if resp.Status == 2 {
+			up(100)
 			return nil
 		}
 	}
@@ -300,6 +393,43 @@ func (d *Open115) Put(ctx context.Context, dstDir model.Obj, file model.FileStre
 		return err
 	}
 	return nil
+}
+
+func (d *Open115) OfflineDownload(ctx context.Context, uris []string, dstDir model.Obj) ([]string, error) {
+	return d.client.AddOfflineTaskURIs(ctx, uris, dstDir.GetID())
+}
+
+func (d *Open115) DeleteOfflineTask(ctx context.Context, infoHash string, deleteFiles bool) error {
+	return d.client.DeleteOfflineTask(ctx, infoHash, deleteFiles)
+}
+
+func (d *Open115) OfflineList(ctx context.Context) (*sdk.OfflineTaskListResp, error) {
+	resp, err := d.client.OfflineTaskList(ctx, 1)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (d *Open115) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	userInfo, err := d.client.UserInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	total, err := ParseInt64(userInfo.RtSpaceInfo.AllTotal.Size)
+	if err != nil {
+		return nil, err
+	}
+	used, err := ParseInt64(userInfo.RtSpaceInfo.AllUse.Size)
+	if err != nil {
+		return nil, err
+	}
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: total,
+			UsedSpace:  used,
+		},
+	}, nil
 }
 
 // func (d *Open115) GetArchiveMeta(ctx context.Context, obj model.Obj, args model.ArchiveArgs) (model.ArchiveMeta, error) {

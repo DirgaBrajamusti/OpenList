@@ -6,16 +6,16 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"mime"
 	"mime/multipart"
+	gonet "net"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
@@ -74,11 +74,7 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 	contentTypes, haveType := w.Header()["Content-Type"]
 	var contentType string
 	if !haveType {
-		contentType = mime.TypeByExtension(filepath.Ext(name))
-		if contentType == "" {
-			// most modern application can handle the default contentType
-			contentType = "application/octet-stream"
-		}
+		contentType = utils.GetMimeType(name)
 		w.Header().Set("Content-Type", contentType)
 	} else if len(contentTypes) > 0 {
 		contentType = contentTypes[0]
@@ -114,14 +110,14 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 
 	// 使用请求的Context
 	// 不然从sendContent读不到数据，即使请求断开CopyBuffer也会一直堵塞
-	ctx := context.WithValue(r.Context(), "request_header", r.Header)
+	ctx := r.Context()
 	switch {
 	case len(ranges) == 0:
 		reader, err := RangeReadCloser.RangeRead(ctx, http_range.Range{Length: -1})
 		if err != nil {
 			code = http.StatusRequestedRangeNotSatisfiable
-			if err == ErrExceedMaxConcurrency {
-				code = http.StatusTooManyRequests
+			if statusCode, ok := errs.UnwrapOrSelf(err).(HttpStatusCodeError); ok {
+				code = int(statusCode)
 			}
 			http.Error(w, err.Error(), code)
 			return nil
@@ -143,8 +139,8 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 		sendContent, err = RangeReadCloser.RangeRead(ctx, ra)
 		if err != nil {
 			code = http.StatusRequestedRangeNotSatisfiable
-			if err == ErrExceedMaxConcurrency {
-				code = http.StatusTooManyRequests
+			if statusCode, ok := errs.UnwrapOrSelf(err).(HttpStatusCodeError); ok {
+				code = int(statusCode)
 			}
 			http.Error(w, err.Error(), code)
 			return nil
@@ -205,8 +201,8 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, name string, modTime time
 				log.Warnf("Maybe size incorrect or reader not giving correct/full data, or connection closed before finish. written bytes: %d ,sendSize:%d, ", written, sendSize)
 			}
 			code = http.StatusInternalServerError
-			if err == ErrExceedMaxConcurrency {
-				code = http.StatusTooManyRequests
+			if statusCode, ok := errs.UnwrapOrSelf(err).(HttpStatusCodeError); ok {
+				code = int(statusCode)
 			}
 			w.WriteHeader(code)
 			return err
@@ -259,9 +255,15 @@ func RequestHttp(ctx context.Context, httpMethod string, headerOverride http.Hea
 		_ = res.Body.Close()
 		msg := string(all)
 		log.Debugln(msg)
-		return res, fmt.Errorf("http request [%s] failure,status: %d response:%s", URL, res.StatusCode, msg)
+		return nil, fmt.Errorf("http request [%s] failure,status: %w response:%s", URL, HttpStatusCodeError(res.StatusCode), msg)
 	}
 	return res, nil
+}
+
+type HttpStatusCodeError int
+
+func (e HttpStatusCodeError) Error() string {
+	return fmt.Sprintf("%d|%s", e, http.StatusText(int(e)))
 }
 
 var once sync.Once
@@ -282,11 +284,40 @@ func HttpClient() *http.Client {
 }
 
 func NewHttpClient() *http.Client {
-	return &http.Client{
-		Timeout: time.Hour * 48,
-		Transport: &http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify},
-		},
+	transport := &http.Transport{
+		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: conf.Conf.TlsInsecureSkipVerify},
 	}
+
+	SetProxyIfConfigured(transport)
+
+	return &http.Client{
+		Timeout:   time.Hour * 48,
+		Transport: &safeTransport{base: transport},
+	}
+}
+
+type safeTransport struct {
+	base http.RoundTripper
+}
+
+func (t *safeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	host := req.URL.Hostname()
+	addrs, err := gonet.DefaultResolver.LookupIPAddr(req.Context(), host)
+	if err != nil || len(addrs) == 0 {
+		return nil, errors.Wrapf(err, "failed to resolve host: %s", host)
+	}
+	for _, addr := range addrs {
+		if isCloudMetadataIP(addr.IP) {
+			return nil, ErrCloudMetadataEndpoint
+		}
+	}
+	return t.base.RoundTrip(req)
+}
+
+var ErrCloudMetadataEndpoint = errors.New("access to cloud metadata endpoint is not allowed")
+
+func isCloudMetadataIP(ip gonet.IP) bool {
+	ip = ip.To4()
+	return ip != nil && ip[0] == 169 && ip[1] == 254 && ip[2] == 169 && ip[3] == 254
 }

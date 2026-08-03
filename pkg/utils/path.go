@@ -44,11 +44,15 @@ func IsSubPath(path string, subPath string) bool {
 }
 
 func Ext(path string) string {
+	return strings.ToLower(SourceExt(path))
+}
+
+func SourceExt(path string) string {
 	ext := stdpath.Ext(path)
 	if len(ext) > 0 && ext[0] == '.' {
 		ext = ext[1:]
 	}
-	return strings.ToLower(ext)
+	return ext
 }
 
 func EncodePath(path string, all ...bool) string {
@@ -75,22 +79,47 @@ func EncodePath(path string, all ...bool) string {
 }
 
 func JoinBasePath(basePath, reqPath string) (string, error) {
-	/** relative path:
-	 * 1. ..
-	 * 2. ../
-	 * 3. /..
-	 * 4. /../
-	 * 5. /a/b/..
-	 */
-	if reqPath == ".." ||
-		strings.HasSuffix(reqPath, "/..") ||
-		strings.HasPrefix(reqPath, "../") ||
-		strings.Contains(reqPath, "/../") {
+	isRelativePath := strings.Contains(reqPath, "..")
+	reqPath = FixAndCleanPath(reqPath)
+	if isRelativePath && !strings.Contains(reqPath, "..") {
 		return "", errs.RelativePath
 	}
-	return stdpath.Join(FixAndCleanPath(basePath), FixAndCleanPath(reqPath)), nil
+	return stdpath.Join(FixAndCleanPath(basePath), reqPath), nil
 }
 
 func GetFullPath(mountPath, path string) string {
 	return stdpath.Join(GetActualMountPath(mountPath), path)
+}
+
+// GetPathHierarchy generates a hierarchy of paths from the given path.
+//
+// Example:
+//  1. "/" => {"/"}
+//  2. "" => {"/"}
+//  3. "/a/b/c" => {"/", "/a", "/a/b", "/a/b/c"}
+//  4. "/a/b/c/d/e.txt" => {"/", "/a", "/a/b", "/a/b/c", "/a/b/c/d", "/a/b/c/d/e.txt"}
+//  5. "./a/b///c" => {"/", "/a", "/a/b", "/a/b/c"}
+func GetPathHierarchy(path string) []string {
+	if path == "" || path == "/" {
+		return []string{"/"}
+	}
+
+	path = FixAndCleanPath(path)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	hierarchy := []string{"/"}
+
+	var currentPath strings.Builder
+	for part := range strings.SplitSeq(path, "/") {
+		if part == "" {
+			continue
+		}
+		currentPath.WriteString("/")
+		currentPath.WriteString(part)
+		hierarchy = append(hierarchy, currentPath.String())
+	}
+
+	return hierarchy
 }

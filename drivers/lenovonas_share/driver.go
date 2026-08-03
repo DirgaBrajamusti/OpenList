@@ -2,7 +2,11 @@ package LenovoNasShare
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/url"
+	stdpath "path"
+	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -29,8 +33,13 @@ func (d *LenovoNasShare) GetAddition() driver.Additional {
 }
 
 func (d *LenovoNasShare) Init(ctx context.Context) error {
+	d.ShareId = stdpath.Base(d.ShareId)
 	if err := d.getStoken(); err != nil {
 		return err
+	}
+	if !d.ShowRootFolder && d.RootFolderPath == "" {
+		list, _ := d.List(ctx, File{}, model.ListArgs{})
+		d.RootFolderPath = list[0].GetPath()
 	}
 	return nil
 }
@@ -41,25 +50,42 @@ func (d *LenovoNasShare) Drop(ctx context.Context) error {
 
 func (d *LenovoNasShare) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
 	d.checkStoken() // 检查stoken是否过期
-	files := make([]File, 0)
+	path := fmt.Sprintf("/%s", strings.Trim(dir.GetPath(), "/"))
 
 	var resp Files
 	query := map[string]string{
 		"code":   d.ShareId,
 		"num":    "5000",
 		"stoken": d.stoken,
-		"path":   dir.GetPath(),
+		"path":   path,
 	}
 	_, err := d.request(d.Host+"/oneproxy/api/share/v1/files", http.MethodGet, func(req *resty.Request) {
 		req.SetQueryParams(query)
 	}, &resp)
+
 	if err != nil {
 		return nil, err
 	}
-	files = append(files, resp.Data.List...)
 
-	return utils.SliceConvert(files, func(src File) (model.Obj, error) {
-		return src, nil
+	return utils.SliceConvert(resp.Data.List, func(src File) (model.Obj, error) {
+		if src.IsDir() {
+			return src, nil
+		}
+		return &model.ObjThumb{
+			Object: model.Object{
+				Name:     src.GetName(),
+				Path:     src.GetPath(),
+				Size:     src.GetSize(),
+				Modified: src.ModTime(),
+				IsFolder: src.IsDir(),
+			},
+			Thumbnail: model.Thumbnail{
+				Thumbnail: func() string {
+					thumbUrl := d.Host + "/oneproxy/api/share/v1/file/thumb?code=" + d.ShareId + "&stoken=" + d.stoken + "&path=" + url.QueryEscape(src.GetPath())
+					return thumbUrl
+				}(),
+			},
+		}, nil
 	})
 }
 
@@ -73,6 +99,7 @@ func (d *LenovoNasShare) getStoken() error { // 获取stoken
 	if d.Host == "" {
 		d.Host = "https://siot-share.lenovo.com.cn"
 	}
+
 	query := map[string]string{
 		"code":     d.ShareId,
 		"password": d.SharePwd,

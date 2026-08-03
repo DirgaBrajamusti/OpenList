@@ -9,8 +9,8 @@ import (
 type Driver interface {
 	Meta
 	Reader
-	//Writer
-	//Other
+	// Writer
+	// Other
 }
 
 type Meta interface {
@@ -110,15 +110,6 @@ type PutURL interface {
 	PutURL(ctx context.Context, dstDir model.Obj, name, url string) error
 }
 
-//type WriteResult interface {
-//	MkdirResult
-//	MoveResult
-//	RenameResult
-//	CopyResult
-//	PutResult
-//	Remove
-//}
-
 type MkdirResult interface {
 	MakeDir(ctx context.Context, parentDir model.Obj, dirName string) (model.Obj, error)
 }
@@ -205,6 +196,25 @@ type ArchiveDecompressResult interface {
 	ArchiveDecompress(ctx context.Context, srcObj, dstDir model.Obj, args model.ArchiveDecompressArgs) ([]model.Obj, error)
 }
 
+type WithDetails interface {
+	// GetDetails get storage details (total space, free space, etc.)
+	GetDetails(ctx context.Context) (*model.StorageDetails, error)
+}
+
 type Reference interface {
 	InitReference(storage Driver) error
+}
+
+type LinkCacheModeResolver interface {
+	// ResolveLinkCacheMode returns the LinkCacheMode for the given path.
+	ResolveLinkCacheMode(path string) LinkCacheMode
+}
+
+type DirectUploader interface {
+	// GetDirectUploadTools returns available frontend-direct upload tools
+	GetDirectUploadTools() []string
+	// GetDirectUploadInfo returns the information needed for direct upload from client to storage
+	// actualPath is the path relative to the storage root (after removing mount path prefix)
+	// return errs.NotImplement if the driver does not support the given direct upload tool
+	GetDirectUploadInfo(ctx context.Context, tool string, dstDir model.Obj, fileName string, fileSize int64) (any, error)
 }

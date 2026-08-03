@@ -41,7 +41,9 @@ func (d *Pan123) GetAddition() driver.Additional {
 }
 
 func (d *Pan123) Init(ctx context.Context) error {
-	_, err := d.Request(UserInfo, http.MethodGet, nil, nil)
+	_, err := d.Request(UserInfo, http.MethodGet, func(req *resty.Request) {
+		req.SetHeader("platform", "web")
+	}, nil)
 	return err
 }
 
@@ -64,14 +66,6 @@ func (d *Pan123) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 
 func (d *Pan123) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
 	if f, ok := file.(File); ok {
-		//var resp DownResp
-		var headers map[string]string
-		if !utils.IsLocalIPAddr(args.IP) {
-			headers = map[string]string{
-				//"X-Real-IP":       "1.1.1.1",
-				"X-Forwarded-For": args.IP,
-			}
-		}
 		data := base.Json{
 			"driveId":   0,
 			"etag":      f.Etag,
@@ -82,28 +76,29 @@ func (d *Pan123) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 			"type":      f.Type,
 		}
 		resp, err := d.Request(DownloadInfo, http.MethodPost, func(req *resty.Request) {
-
-			req.SetBody(data).SetHeaders(headers)
+			req.SetBody(data)
 		}, nil)
 		if err != nil {
 			return nil, err
 		}
 		downloadUrl := utils.Json.Get(resp, "data", "DownloadUrl").ToString()
-		u, err := url.Parse(downloadUrl)
+		ou, err := url.Parse(downloadUrl)
 		if err != nil {
 			return nil, err
 		}
-		nu := u.Query().Get("params")
+		u_ := ou.String()
+		nu := ou.Query().Get("params")
 		if nu != "" {
 			du, _ := base64.StdEncoding.DecodeString(nu)
-			u, err = url.Parse(string(du))
+			u, err := url.Parse(string(du))
 			if err != nil {
 				return nil, err
 			}
+			u_ = u.String()
 		}
-		u_ := u.String()
+
 		log.Debug("download url: ", u_)
-		res, err := base.NoRedirectClient.R().SetHeader("Referer", "https://www.123pan.com/").Get(u_)
+		res, err := base.NoRedirectClient.R().SetHeader("Referer", "https://yun.123pan.com/").Get(u_)
 		if err != nil {
 			return nil, err
 		}
@@ -118,7 +113,7 @@ func (d *Pan123) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 			link.URL = utils.Json.Get(res.Body(), "data", "redirect_url").ToString()
 		}
 		link.Header = http.Header{
-			"Referer": []string{"https://www.123pan.com/"},
+			"Referer": []string{fmt.Sprintf("%s://%s/", ou.Scheme, ou.Host)},
 		}
 		return &link, nil
 	} else {
@@ -188,7 +183,7 @@ func (d *Pan123) Put(ctx context.Context, dstDir model.Obj, file model.FileStrea
 	etag := file.GetHash().GetHash(utils.MD5)
 	var err error
 	if len(etag) < utils.MD5.Width {
-		_, etag, err = stream.CacheFullInTempFileAndHash(file, utils.MD5)
+		_, etag, err = stream.CacheFullAndHash(file, &up, utils.MD5)
 		if err != nil {
 			return err
 		}
@@ -258,6 +253,19 @@ func (d *Pan123) APIRateLimit(ctx context.Context, api string) error {
 	limiter := value.(*rate.Limiter)
 
 	return limiter.Wait(ctx)
+}
+
+func (d *Pan123) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	userInfo, err := d.getUserInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &model.StorageDetails{
+		DiskUsage: model.DiskUsage{
+			TotalSpace: userInfo.Data.SpacePermanent + userInfo.Data.SpaceTemp,
+			UsedSpace:  userInfo.Data.SpaceUsed,
+		},
+	}, nil
 }
 
 var _ driver.Driver = (*Pan123)(nil)

@@ -19,6 +19,7 @@ func (a *ApiInfo) Require() {
 		a.token <- struct{}{}
 	}
 }
+
 func (a *ApiInfo) Release() {
 	if a.qps > 0 {
 		time.AfterFunc(time.Second, func() {
@@ -26,13 +27,16 @@ func (a *ApiInfo) Release() {
 		})
 	}
 }
+
 func (a *ApiInfo) SetQPS(qps int) {
 	a.qps = qps
 	a.token = make(chan struct{}, qps)
 }
+
 func (a *ApiInfo) NowLen() int {
 	return len(a.token)
 }
+
 func InitApiInfo(url string, qps int) *ApiInfo {
 	return &ApiInfo{
 		url:   url,
@@ -54,9 +58,13 @@ type File struct {
 	Category     int    `json:"category"`
 	Status       int    `json:"status"`
 	Trashed      int    `json:"trashed"`
+	SHA1         string
 }
 
 func (f File) GetHash() utils.HashInfo {
+	if len(f.SHA1) == utils.SHA1.Width && len(f.Etag) != utils.MD5.Width {
+		return utils.NewHashInfo(utils.SHA1, f.SHA1)
+	}
 	return utils.NewHashInfo(utils.MD5, f.Etag)
 }
 
@@ -73,7 +81,9 @@ func (f File) GetName() string {
 }
 
 func (f File) CreateTime() time.Time {
-	parsedTime, err := time.Parse("2006-01-02 15:04:05", f.CreateAt)
+	// 返回的时间没有时区信息，默认 UTC+8
+	loc := time.FixedZone("UTC+8", 8*60*60)
+	parsedTime, err := time.ParseInLocation("2006-01-02 15:04:05", f.CreateAt, loc)
 	if err != nil {
 		return time.Now()
 	}
@@ -81,7 +91,9 @@ func (f File) CreateTime() time.Time {
 }
 
 func (f File) ModTime() time.Time {
-	parsedTime, err := time.Parse("2006-01-02 15:04:05", f.UpdateAt)
+	// 返回的时间没有时区信息，默认 UTC+8
+	loc := time.FixedZone("UTC+8", 8*60*60)
+	parsedTime, err := time.ParseInLocation("2006-01-02 15:04:05", f.UpdateAt, loc)
 	if err != nil {
 		return time.Now()
 	}
@@ -113,29 +125,32 @@ type AccessTokenResp struct {
 }
 
 type RefreshTokenResp struct {
-	AccessToken  string `json:"access_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	RefreshToken string `json:"refresh_token"`
-	Scope        string `json:"scope"`
-	TokenType    string `json:"token_type"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	ExpiresIn        int64  `json:"expires_in"`
+	Code             int    `json:"code"`
+	Message          string `json:"message"`
+	ErrorDescription string `json:"error_description"`
+	Error            string `json:"error"`
+	Text             string `json:"text"`
 }
 
 type UserInfoResp struct {
 	BaseResp
 	Data struct {
-		UID            int64  `json:"uid"`
-		Username       string `json:"username"`
-		DisplayName    string `json:"displayName"`
-		HeadImage      string `json:"headImage"`
-		Passport       string `json:"passport"`
-		Mail           string `json:"mail"`
-		SpaceUsed      int64  `json:"spaceUsed"`
-		SpacePermanent int64  `json:"spacePermanent"`
-		SpaceTemp      int64  `json:"spaceTemp"`
-		SpaceTempExpr  string `json:"spaceTempExpr"`
-		Vip            bool   `json:"vip"`
-		DirectTraffic  int64  `json:"directTraffic"`
-		IsHideUID      bool   `json:"isHideUID"`
+		UID uint64 `json:"uid"`
+		// Username       string `json:"username"`
+		// DisplayName    string `json:"displayName"`
+		// HeadImage      string `json:"headImage"`
+		// Passport       string `json:"passport"`
+		// Mail           string `json:"mail"`
+		SpaceUsed      int64 `json:"spaceUsed"`
+		SpacePermanent int64 `json:"spacePermanent"`
+		SpaceTemp      int64 `json:"spaceTemp"`
+		// SpaceTempExpr  int64  `json:"spaceTempExpr"`
+		// Vip            bool   `json:"vip"`
+		// DirectTraffic  int64  `json:"directTraffic"`
+		// IsHideUID      bool   `json:"isHideUID"`
 	} `json:"data"`
 }
 
@@ -154,52 +169,53 @@ type DownloadInfoResp struct {
 	} `json:"data"`
 }
 
+type DirectLinkResp struct {
+	BaseResp
+	Data struct {
+		URL string `json:"url"`
+	} `json:"data"`
+}
+
+// 创建文件V2返回
 type UploadCreateResp struct {
 	BaseResp
 	Data struct {
-		FileID      int64  `json:"fileID"`
-		PreuploadID string `json:"preuploadID"`
-		Reuse       bool   `json:"reuse"`
-		SliceSize   int64  `json:"sliceSize"`
+		FileID      int64    `json:"fileID"`
+		PreuploadID string   `json:"preuploadID"`
+		Reuse       bool     `json:"reuse"`
+		SliceSize   int64    `json:"sliceSize"`
+		Servers     []string `json:"servers"`
 	} `json:"data"`
 }
 
-type UploadUrlResp struct {
-	BaseResp
-	Data struct {
-		PresignedURL string `json:"presignedURL"`
-	}
-}
-
+// 上传完毕V2返回
 type UploadCompleteResp struct {
 	BaseResp
 	Data struct {
-		Async     bool  `json:"async"`
 		Completed bool  `json:"completed"`
 		FileID    int64 `json:"fileID"`
 	} `json:"data"`
 }
 
-type UploadAsyncResp struct {
+type SHA1ReuseResp struct {
 	BaseResp
 	Data struct {
-		Completed bool  `json:"completed"`
-		FileID    int64 `json:"fileID"`
+		FileID int64 `json:"fileID"`
+		Reuse  bool  `json:"reuse"`
 	} `json:"data"`
 }
 
-type UploadResp struct {
+type OfflineDownloadResp struct {
 	BaseResp
 	Data struct {
-		AccessKeyId     string `json:"AccessKeyId"`
-		Bucket          string `json:"Bucket"`
-		Key             string `json:"Key"`
-		SecretAccessKey string `json:"SecretAccessKey"`
-		SessionToken    string `json:"SessionToken"`
-		FileId          int64  `json:"FileId"`
-		Reuse           bool   `json:"Reuse"`
-		EndPoint        string `json:"EndPoint"`
-		StorageNode     string `json:"StorageNode"`
-		UploadId        string `json:"UploadId"`
+		TaskID int `json:"taskID"`
+	} `json:"data"`
+}
+
+type OfflineDownloadProcessResp struct {
+	BaseResp
+	Data struct {
+		Process float64 `json:"process"`
+		Status  int     `json:"status"`
 	} `json:"data"`
 }
