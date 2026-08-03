@@ -68,7 +68,7 @@ jobs:
             hash: "md5"
             flags: ""
             goflags: ""
-          - target: "linux-(mips|mips64|mipsle|mips64le|loong64)-musl*" # musl-compat-family
+          - target: "linux-(mips|mips64|mipsle|mips64le)-musl*" # musl-compat-family
             hash: "md5-linux-musl-mips"
             flags: "-ldflags=-linkmode external -extldflags '-static -fpic'"
             goflags: ""
