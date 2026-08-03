@@ -39,14 +39,24 @@ jobs:
           git tag -l
           npx changelogithub --output CHANGELOG.md
 
+      - name: Truncate changelog for release body
+        run: |
+          MAX_BODY=120000
+          if [ $(wc -c < CHANGELOG.md) -gt $MAX_BODY ]; then
+            head -c $MAX_BODY CHANGELOG.md > CHANGELOG_RELEASE.md
+            echo -e "\n\n---\n**Note:** Full changelog is attached as CHANGELOG.md below." >> CHANGELOG_RELEASE.md
+          else
+            cp CHANGELOG.md CHANGELOG_RELEASE.md
+          fi
+
       - name: Upload assets to beta release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ! gh release view beta; then
-            gh release create beta --prerelease --notes-file CHANGELOG.md
+            gh release create beta --prerelease --notes-file CHANGELOG_RELEASE.md
           else
-            gh release edit beta --prerelease --notes-file CHANGELOG.md
+            gh release edit beta --prerelease --notes-file CHANGELOG_RELEASE.md
           fi
           gh release upload beta "CHANGELOG.md" --clobber
 
